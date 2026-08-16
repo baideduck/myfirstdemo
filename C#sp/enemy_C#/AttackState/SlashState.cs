@@ -2,107 +2,78 @@ using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// ���ƣ�Kanpo������������ͨ�񵲣�ֻ�������񵲿��ơ�
-/// ע�⣺�ļ����������� SlashState����ʵ�ʶ�Ӧ Kanpo ��ʽ��
+/// SlashState (KanPo) — 看破斩
 /// </summary>
-public class SlashState : State<EnemyController>
+public class SlashState : AttackStateBase
 {
-    private EnemyController enemy;
-    private bool attackFinished = false;
-    private Coroutine routine;
+    [Header("Timing")]
+    public float hitWindowStart = 0.167f;
+    public float hitWindowDuration = 0.25f;
+    public float sheathTime = 2.167f;
+    public float totalTime = 2.85f;
 
-    [Header("Kanpo time params (60fps, 171 frames total)")]
-    public float sheathTime = 2.167f;           // 收刀：130/60
-    public float hitWindowStart = 0.167f;       // 开：10/60
-    public float hitWindowDuration = 0.25f;     // 15帧：25-10/60
-    public int damage = 25;                     // �����˺�
+    [Header("Damage")]
+    public int damage = 25;
+    public bool isGuardBreak = true;
 
-    [Header("��ʽ����")]
-    public bool canBeBlocked = true;
-    public bool isGuardBreak = true;            // �Ʒ���������ͨ��
-    public bool hasSuperArmor = false;
+    [Header("Animation")]
+    public string animName = "Kanpo";
+    public string animBool = "isKanpo";
 
-    public override void Enter(EnemyController owner)
+    protected override EnemyStates AttackType => EnemyStates.KanPo;
+
+    protected override void SetupAnimation()
     {
-        if (owner == null) return;
-        enemy = owner;
-        attackFinished = false;
-        enemy.AttachWeaponToHand();
+        anim.SetLayerWeight(attackLayer, 1f);
+        anim.SetBool(animBool, true);
+        anim.Play(animName, attackLayer, 0f);
+    }
 
-        if (enemy.anim == null)
+    protected override void CleanupAnimation()
+    {
+        anim.SetBool(animBool, false);
+    }
+
+    protected override IEnumerator AttackRoutine => AttackRoutineImpl();
+
+    IEnumerator AttackRoutineImpl()
+    {
+        float startTime = Time.time;
+        float wait = Mathf.Max(0, hitWindowStart - (Time.time - startTime));
+        if (wait > 0) yield return new WaitForSeconds(wait);
+        if (combat.shouldAbortAttack) yield break;
+
+        combat.SetAttackDamage(damage);
+        combat.EnableWeaponHitBox(true, false);
+
+        float hitEnd = startTime + hitWindowStart + hitWindowDuration;
+        while (Time.time < hitEnd)
         {
-            enemy.ChangeState(EnemyStates.Idle);
-            return;
+            if (combat.shouldAbortAttack) { combat.EnableWeaponHitBox(false, false); yield break; }
+            // ★ 派生模式：动画到衔接点立即结束判定（先到者，保证连招节奏不被长判定窗口卡住）
+            if (combat.isDerivedMove && AnimAtLinkPoint())
+            {
+                combat.EnableWeaponHitBox(false, false);
+                yield break;
+            }
+            yield return null;
         }
+        combat.EnableWeaponHitBox(false, false);
+        if (combat.shouldAbortAttack) yield break;
 
-        if (routine != null) enemy.StopCoroutine(routine);
-        enemy.AttachWeaponToHand();
-        enemy.anim.SetBool("isKanpo", true);
+        if (combat.isDerivedMove)
+        {
+            // ★ 要求：攻击动画完整播完 → 马上接下一招（不再 0.2s 快速收刀掐断动画）
+            yield return WaitAttackAnimationEnd();
+            yield break;   // 攻击结束，链队列立即接下一招
+        }
+        float waitToSheath = Mathf.Max(0, sheathTime - (Time.time - startTime));
+        if (waitToSheath > 0) yield return new WaitForSeconds(waitToSheath);
 
-        // 跟 ThrustSlash 一致：在 Enter 内设权重 + 强制播放，跳过过渡
-        int attackLayer = enemy.anim.GetLayerIndex("Attack Layer");
-        if (attackLayer == -1) attackLayer = 0;
-        enemy.anim.SetLayerWeight(attackLayer, 1f);
-        enemy.anim.Play("Kanpo", attackLayer, 0f);
+        float remaining = Mathf.Max(0, totalTime - (Time.time - startTime));
+        if (remaining > 0) yield return new WaitForSeconds(remaining);
 
-        routine = enemy.StartCoroutine(KanpoRoutine());
-        enemy.RegisterAttackRoutine(routine);
-
-        // 1. ֹͣ�ƶ����������
-        enemy.FacePlayer();
-    }
-
-    IEnumerator KanpoRoutine()
-    {
-        float animStartTime = Time.time;
-        enemy.anim.Update(0f);
-
-        // �ȴ����д���
-        float timeToHit = Mathf.Max(0, hitWindowStart - (Time.time - animStartTime));
-        yield return new WaitForSeconds(timeToHit);
-
-        // �����˺���������ײ��
-        enemy.currentAttackDamage = damage;
-        enemy.EnableWeaponHitBox(true, false);
-
-        // ���ּ��̵Ĵ���
-        yield return new WaitForSeconds(hitWindowDuration);
-
-        // �ر���ײ��
-        enemy.EnableWeaponHitBox(false, false);
-
-        // 收刀阶段：统一正常速度 + 决策
-        float timeToSheath = Mathf.Max(0, sheathTime - hitWindowStart - hitWindowDuration);
-        var phaseMgr = enemy.GetComponent<BossPhaseManager>();
-        bool isBurst = phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst;
-
-        if (isBurst)
-            enemy.nextMoveAfterSheath = FindObjectOfType<BossDecisionEngine>()?.ForceDecide();
-
-        yield return new WaitForSeconds(timeToSheath);
-
-        // �ȴ�����β��
-        float tailTime = (171f / 60f) - sheathTime;
-        if (tailTime > 0) yield return new WaitForSeconds(tailTime);
-        enemy.anim.SetBool("isKanpo", false);
+        anim.SetBool(animBool, false);
         yield return null;
-        attackFinished = true;
-    }
-
-    public override void Execute()
-    {
-        if (enemy == null) return;
-        enemy.FacePlayer();
-
-        if (attackFinished)
-            enemy.OnAttackFinished();
-    }
-
-    public override void Exit()
-    {
-        if (routine != null) enemy.StopCoroutine(routine);
-        enemy.RegisterAttackRoutine(null);      // ע��
-        enemy.EnableWeaponHitBox(false, false);
-        enemy.ForceWeaponToSheath();
     }
 }

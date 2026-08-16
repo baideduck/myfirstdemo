@@ -1,98 +1,72 @@
 using System.Collections;
 using UnityEngine;
 
-public class NormalSlashState : State<EnemyController>
+/// <summary>
+/// NormalSlashState — 普通斩击
+/// </summary>
+public class NormalSlashState : AttackStateBase
 {
-    private EnemyController enemy;
-    private bool attackFinished = false;
-    private Coroutine routine;
-
-    [Header("攻击参数")]
-    public int damage = 25;
-    public float sheathTime = 1.933f;              // 收刀时刻（秒）
-    public float sheathSlowStartTime = 0.7f;       // 从这一秒开始慢放到收刀结束
-    public float hitWindowStart = 0f;
+    [Header("Timing")]
     public float hitWindowDuration = 0.2f;
+    public float sheathTime = 1.933f;
+    public float tailTime = 0.1f;
 
-    public override void Enter(EnemyController owner)
+    [Header("Damage")]
+    public int damage = 25;
+    public bool isGuardBreak;
+
+    [Header("Animation")]
+    public string animBool = "isSlashing";
+
+    protected override EnemyStates AttackType => EnemyStates.NormalSlash;
+
+    protected override void SetupAnimation()
     {
-        if (owner == null) return;
-        enemy = owner;
-        attackFinished = false;
+        anim.SetLayerWeight(attackLayer, 1f);
+        anim.SetBool(animBool, true);
+    }
 
-        if (enemy.anim == null)
+    protected override void CleanupAnimation()
+    {
+        anim.SetBool(animBool, false);
+    }
+
+    protected override IEnumerator AttackRoutine => AttackRoutineImpl();
+
+    IEnumerator AttackRoutineImpl()
+    {
+        float startTime = Time.time;
+        combat.SetAttackDamage(damage);
+        combat.EnableWeaponHitBox(true, false);
+
+        float hitEnd = startTime + hitWindowDuration;
+        while (Time.time < hitEnd)
         {
-            enemy.ChangeState(EnemyStates.Idle);
-            return;
+            if (combat.shouldAbortAttack) { combat.EnableWeaponHitBox(false, false); yield break; }
+            // ★ 派生模式：动画到衔接点立即结束判定（先到者，保证连招节奏不被长判定窗口卡住）
+            if (combat.isDerivedMove && AnimAtLinkPoint())
+            {
+                combat.EnableWeaponHitBox(false, false);
+                yield break;
+            }
+            yield return null;
         }
+        combat.EnableWeaponHitBox(false, false);
+        if (combat.shouldAbortAttack) yield break;
 
-        // �� 1. ��ȷ����������
-        enemy.AttachWeaponToHand();
-        enemy.weaponLockedInHand = true;   // 首刀后刀锁在手上，不回鞘
+        if (combat.isDerivedMove)
+        {
+            // ★ 要求：攻击动画完整播完 → 马上接下一招（不再 0.2s 快速收刀掐断动画）
+            yield return WaitAttackAnimationEnd();
+            yield break;   // 攻击结束，链队列立即接下一招
+        }
+        float wait = Mathf.Max(0, sheathTime - (Time.time - startTime));
+        if (wait > 0) yield return new WaitForSeconds(wait);
 
-        // 2. ����Э�̣�����������
-        if (routine != null) enemy.StopCoroutine(routine);
-        routine = enemy.StartCoroutine(SlashRoutine());
-        enemy.RegisterAttackRoutine(routine);
+        float remaining = Mathf.Max(0, tailTime);
+        if (remaining > 0) yield return new WaitForSeconds(remaining);
 
-        // 3. ��������
-        enemy.anim.SetBool("isSlashing", true);
-        enemy.FacePlayer();
-    }
-
-    IEnumerator SlashRoutine()
-    {
-        if (enemy.shouldAbortAttack) yield break;
-
-        // �ȴ���������ײ�忪��ʱ��
-        float timeToHit = Mathf.Max(0, hitWindowStart);
-        yield return new WaitForSeconds(timeToHit);
-
-        if (enemy.shouldAbortAttack) yield break;
-
-        // ����������ײ��
-        enemy.currentAttackDamage = damage;
-        enemy.EnableWeaponHitBox(true, false);
-
-        yield return new WaitForSeconds(hitWindowDuration);
-        enemy.EnableWeaponHitBox(false, false);
-
-        if (enemy.shouldAbortAttack) yield break;
-
-        // 先等攻击帧结束，再等慢放起点
-        float timeToSlowStart = Mathf.Max(0, sheathSlowStartTime - hitWindowStart - hitWindowDuration);
-        if (timeToSlowStart > 0f)
-            yield return new WaitForSeconds(timeToSlowStart);
-
-        // 收刀阶段：统一正常速度 + 决策
-        float timeToSheath = Mathf.Max(0, sheathTime - sheathSlowStartTime);
-        var phaseMgr = enemy.GetComponent<BossPhaseManager>();
-        bool isBurst = phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst;
-
-        if (isBurst)
-            enemy.nextMoveAfterSheath = FindObjectOfType<BossDecisionEngine>()?.ForceDecide();
-
-        yield return new WaitForSeconds(timeToSheath);
-
-        if (enemy.shouldAbortAttack) yield break;
-        enemy.anim.SetBool("isSlashing", false);
+        anim.SetBool(animBool, false);
         yield return null;
-        attackFinished = true;
-    }
-
-    public override void Execute()
-    {
-        if (enemy == null) return;
-        enemy.FacePlayer();
-        if (attackFinished) enemy.OnAttackFinished();
-    }
-
-    public override void Exit()
-    {
-        if (routine != null) StopCoroutine(routine);
-        enemy.RegisterAttackRoutine(null);
-        // �ر�������ײ��ǿ�ƹ���
-        enemy.EnableWeaponHitBox(false, false);
-        enemy.ForceWeaponToSheath();
     }
 }

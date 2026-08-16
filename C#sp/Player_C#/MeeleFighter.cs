@@ -4,43 +4,41 @@ using UnityEngine;
 
 public class MeeleFighter : MonoBehaviour
 {
-    [Header("��������")]
+    [Header("所有招式")]
     [SerializeField] List<AttackData> allMoves;
 
-    [Header("����ģ��")]
+    [Header("武器模型")]
     [SerializeField] public GameObject weaponRight;
     [SerializeField] public GameObject weaponLeft;
     [SerializeField] public GameObject weaponBack;
 
-    [Header("�յ�/�ε�����")]
+    [Header("拔刀/收刀动画")]
     [SerializeField] string equipAnimName = "GreatSword_Equip_Inplace";
     [SerializeField] string sheatheAnimName = "GreatSword_Unarm_Inplace";
 
-    [Header("��")]
+    [Header("格挡")]
     [SerializeField] bool enableBlocking = true;
     [SerializeField] float blockStaminaCostPerSecond = 0f;
     [SerializeField] float blockSharpnessCostPerHit = 0f;
     [SerializeField] float blockEndTransitionDelay = 0.3f;
     [SerializeField] float blockCooldown = 0.35f;
 
-    [Header("ĥ��")]
+    [Header("磨刀")]
     [SerializeField] float sharpenDuration = 2.5f;
     [SerializeField] string sharpenAnimName = "Sharpen";
 
-    [Header("��������")]
-    [SerializeField] private float minComboWindow = 0.15f;   // ������ʼ�����ٲ�����ô�ò����������ν�
-    private bool isCommittingToAttack = false;   // �����ύ�У���ֹ������
+    [Header("连击缓冲")]
+    [SerializeField] private float minComboWindow = 0.15f;   // 连击开始输入缓冲的最小窗口，太小会导致无法连招
+    private bool isCommittingToAttack = false;   // 攻击提交中，禁止任何攻击
 
-    [Header("����")]
-    [SerializeField] private string executionAnimName = "Execution";     // ��Ҵ���������
-    [SerializeField] private float executionAnimLength = 2f;             // ��������ʱ��
-    [SerializeField] private string bossBeExecutionAnimName = "BeExecution"; // Boss ������������
+    [Header("处决")]
+    [SerializeField] private string executionAnimName = "Execution";     // 玩家处决动画
+    [SerializeField] private float executionAnimLength = 2f;             // 处决动画时间
+    [SerializeField] private string bossBeExecutionAnimName = "BeExecution"; // Boss 被处决动画
     private bool isExecuting = false;
 
-    [Header("������Ч")]
-    [SerializeField] private GameObject chargeLevel2Effect;   // ������������1�룩ʱ����Ч
-    [SerializeField] private GameObject chargeLevel3Effect;   // ������������2�룩ʱ����Ч
-
+    [Header("蓄力特效")]
+    [SerializeField] private GameObject chargeLevel2Effect;   // 蓄力Lv2特效（>1.4s）
 
     public bool IsBlocking { get; private set; } = false;
     public System.Action OnBlockFailed;
@@ -71,13 +69,14 @@ public class MeeleFighter : MonoBehaviour
     private float comboResetTime = 3f;
     private Vector2 currentMoveInput;
     private Vector2 lastNonZeroInput;
-    private float lastChargeEndTime = -10f;   // ��������ʱ�䣬������ȴ
+    private float lastChargeEndTime = -10f;   // 蓄力结束时间，用于冷却
     public bool CanBeInterrupted { get; private set; } = false;
     private Coroutine blockCoroutine;
     private bool isBlockCoroutineActive = false;
     private float lastBlockEndTime = -10f;
     private bool isSharpening = false;
     private Coroutine currentMoveCoroutine = null;
+    private Coroutine exitSmoothCoroutine = null;     // SmoothExitAttackLayer
 
     public bool IsStaggering { get; private set; } = false;
     public bool IsCurrentAttackHeavy { get; private set; } = false;
@@ -144,7 +143,7 @@ public class MeeleFighter : MonoBehaviour
     public void TryAttack(AttackData.AttackInputType inputType)
     {
         if (IsBlocking) return;
-        if (isCommittingToAttack) return;   // �ύ�У���ֹ�κι���
+        if (isCommittingToAttack) return;   // 提交中，禁止任何攻击
 
         if (inputType == AttackData.AttackInputType.Heavy && Time.time < lastChargeEndTime + 0.2f)
             return;
@@ -190,7 +189,11 @@ public class MeeleFighter : MonoBehaviour
     {
         if (!IsBlocking) return;
 
-        // ֹͣ�����Э�̺�״̬
+        // ★ 重置攻击伤害锁，防止切换武器时误伤 Boss
+        canDamageThisAttack = false;
+        isCommittingToAttack = false;
+
+        // 终止格挡协程和状态
         if (blockCoroutine != null)
         {
             StopCoroutine(blockCoroutine);
@@ -202,7 +205,7 @@ public class MeeleFighter : MonoBehaviour
         BlockStartTime = -1f;
         IsInBlockRecovery = true;
 
-        // �� �����Ʒ�������ȷ�� Animator ���� "BlockFail" �� "Block_Fail" ��������
+        // 请确保动画控制器包含 "BlockFail" 或 "Block_Fail" 触发器
 
         // 关闭 Root Motion，防止 Block_Fail 动画残留驱动角色滑步
         animator.applyRootMotion = false;
@@ -215,10 +218,10 @@ public class MeeleFighter : MonoBehaviour
         animator.ResetTrigger("BlockStart");
         animator.ResetTrigger("BlockEnd");
 
-        // �� �����Ʒ�������ȷ�� Animator ���� "BlockFail" �� "Block_Fail" ��������
+        // 请确保动画控制器包含 "BlockFail" 或 "Block_Fail" 触发器
         animator.SetTrigger("BlockFail");
 
-        // �л�����������ʾ�������ʱ�õ�������������
+        // 切换回右手武器，确保格挡失败时用右手武器显示
         if (CurrentCombatState == CombatState.Drawn)
             SwitchToRightWeapon();
 
@@ -229,8 +232,8 @@ public class MeeleFighter : MonoBehaviour
         // InAction 不由 TriggerBlockFail 管理，由调用方（PlayerDefense.OnBlockFailed）决定
         lastBlockEndTime = Time.time;
 
-        // �ӳٽ���Ӳֱ
-        StartCoroutine(DelayedRecoveryUnlock(0.5f)); // ����ͨ�񵲺�ҡ����
+        // 延迟解锁硬直
+        StartCoroutine(DelayedRecoveryUnlock(0.5f)); // 普通格挡失败摇晃
     }
     public void TryStartBlock()
     {
@@ -300,20 +303,22 @@ public class MeeleFighter : MonoBehaviour
         if (IsBlocking) { ForceStopBlock(); return true; }
         if (!InAction) return true;
 
-        // �����ͷŽ׶β�������
+        // 蓄力释放阶段不能翻滚取消
         if (currentMove != null && currentMove.IsChargeable)
             return false;
 
-        // �� ���������ƣ�ֻ���ڹ��������ĺ� 20% ȡ����ҡ
-        if (animator != null && attackLayerIndex >= 0)
+        // ★ 翻滚打断时机：当前招的伤害窗口（ImpactEndTime）结束后即可打断
+        //   （替换"动画后 20%"——窗口结束即判定结束，收招期可翻滚取消）
+        if (animator != null && attackLayerIndex >= 0 && currentMove != null)
         {
             AnimatorStateInfo state = animator.GetCurrentAnimatorStateInfo(attackLayerIndex);
-            float progress = state.length > 0.001f ? state.normalizedTime % 1f : 0f;
-            if (progress < 0.8f)
-                return false;   // ǰ 80% ��ֹ����ȡ�������ܻᱻ PlayerController ����
+            // Clamp01 而非 %1f：非循环 clip 播完时 normalizedTime=1.0，1.0%1f=0 → progress 跳变回 0
+            float progress = state.length > 0.001f ? Mathf.Clamp01(state.normalizedTime) : 0f;
+            if (progress < currentMove.ImpactEndTime)
+                return false;   // 伤害窗口内禁止翻滚打断
         }
 
-        // ��������ȡ��
+        // 立即取消
         if (currentMoveCoroutine != null)
         {
             StopCoroutine(currentMoveCoroutine);
@@ -340,12 +345,12 @@ public class MeeleFighter : MonoBehaviour
 
         if (CurrentCombatState == CombatState.Sheathed)
         {
-            // �յ�״̬���ε� �� ĥ�� �� �յ�
+            // 收刀状态：拔刀 → 磨刀 → 收刀
             StartCoroutine(SharpenFromSheathedRoutine());
         }
         else
         {
-            // �ε�״̬��ĥ�� �� �յ�
+            // 拔刀状态：磨刀 → 收刀
             StartCoroutine(SharpenFromDrawnRoutine());
         }
     }
@@ -354,7 +359,7 @@ public class MeeleFighter : MonoBehaviour
         isSharpening = true;
         InAction = true;
 
-        // --- ��һ�����ε� ---
+        // --- 第一阶段：拔刀 ---
         animator.SetLayerWeight(attackLayerIndex, 1f);
         animator.CrossFade(equipAnimName, 0.1f, attackLayerIndex);
         yield return null;
@@ -367,13 +372,13 @@ public class MeeleFighter : MonoBehaviour
 
         CurrentCombatState = CombatState.Drawn;
 
-        // --- �ڶ�����ĥ�� ---
+        // --- 第二阶段：磨刀 ---
         animator.CrossFade(sharpenAnimName, 0.1f, attackLayerIndex);
         yield return new WaitForSeconds(sharpenDuration);
         PlayerSharpness sharpness = GetComponent<PlayerSharpness>();
         sharpness?.Sharpen();
 
-        // --- ���������յ� ---
+        // --- 第三阶段：收刀 ---
         animator.CrossFade(sheatheAnimName, 0.1f, attackLayerIndex);
         yield return null;
         var sheatheState = animator.GetCurrentAnimatorStateInfo(attackLayerIndex);
@@ -381,9 +386,9 @@ public class MeeleFighter : MonoBehaviour
         float sheatheAttachTime = sheatheLength * (60f / 90f);
         yield return new WaitForSeconds(sheatheAttachTime);
 
-        // �л�����������
+        // 切换到背武器
         SwitchToBackWeapon();
-        // �� ǿ�ư�����ģ�͹ҵ����ϣ��������б����ҵ�Ļ���
+        // 强制把武器模型挂到背上，防止错位或穿模
         if (weaponBack != null)
         {
             weaponBack.transform.localPosition = Vector3.zero;
@@ -405,15 +410,14 @@ public class MeeleFighter : MonoBehaviour
         isSharpening = true;
         InAction = true;
 
-        // --- ��һ����ĥ�� ---
+        // --- 第一阶段：磨刀 ---
         animator.SetLayerWeight(attackLayerIndex, 1f);
         animator.CrossFade(sharpenAnimName, 0.1f, attackLayerIndex);
         yield return new WaitForSeconds(sharpenDuration);
         PlayerSharpness sharpness = GetComponent<PlayerSharpness>();
         sharpness?.Sharpen();
 
-        // --- �ڶ������յ� ---
-        // --- �ڶ������յ� ---
+        // --- 第二阶段：收刀 ---
         animator.CrossFade(sheatheAnimName, 0.1f, attackLayerIndex);
         yield return null;
         var sheatheState = animator.GetCurrentAnimatorStateInfo(attackLayerIndex);
@@ -421,9 +425,9 @@ public class MeeleFighter : MonoBehaviour
         float sheatheAttachTime = sheatheLength * (60f / 90f);
         yield return new WaitForSeconds(sheatheAttachTime);
 
-        // �л�����������
+        // 切换到背武器
         SwitchToBackWeapon();
-        // �� ǿ�ư�����ģ�͹ҵ�����
+        // 强制把武器模型挂到背上
         if (weaponBack != null)
         {
             weaponBack.transform.localPosition = Vector3.zero;
@@ -649,30 +653,23 @@ public class MeeleFighter : MonoBehaviour
 
         float chargeTimer = 0f;
         int chargeLevel = 1;
-        float[] thresholds = move.ChargeThresholds;
+        float chargeThreshold = 1.4f;      // 两段蓄力分界线
         isCommittingToAttack = false;
         IsCharging = true;
         while (Input.GetKey(KeyCode.Mouse1))
         {
-            if (!IsCharging) yield break;   // ��ȡ���������˳�
+            if (!IsCharging) yield break;
             chargeTimer += Time.unscaledDeltaTime;
 
-            if (thresholds.Length >= 2 && chargeTimer >= thresholds[1])
-                chargeLevel = 3;
-            else if (thresholds.Length >= 1 && chargeTimer >= thresholds[0])
+            if (chargeTimer >= chargeThreshold)
                 chargeLevel = 2;
             else
                 chargeLevel = 1;
 
-            // �����׶���Ч
+            // 蓄力 Lv2 特效（>1.4s）
             if (chargeLevel >= 2 && chargeLevel2Effect != null && !chargeLevel2Effect.activeSelf)
                 chargeLevel2Effect.SetActive(true);
 
-            if (chargeLevel >= 3 && chargeLevel3Effect != null && !chargeLevel3Effect.activeSelf)
-            {
-                chargeLevel3Effect.SetActive(true);
-                Debug.Log("������Ч�Ѽ���");
-            }
             CurrentChargeLevel = chargeLevel;
             if (move.HasEnhanceAnim && chargeTimer >= move.EnhanceTriggerTime && !hasPlayedEnhance)
             {
@@ -687,9 +684,8 @@ public class MeeleFighter : MonoBehaviour
         }
         IsCharging = false;
 
-        // ����������Ч
+        // 关闭蓄力特效
         if (chargeLevel2Effect != null) chargeLevel2Effect.SetActive(false);
-        if (chargeLevel3Effect != null) chargeLevel3Effect.SetActive(false);
 
         string releaseAnim = move.AnimName;
         if (move.ChargeReleaseAnims != null && move.ChargeReleaseAnims.Length > 0)
@@ -705,6 +701,9 @@ public class MeeleFighter : MonoBehaviour
         animator.Play(releaseAnim, attackLayerIndex, 0f);
         animator.Update(0);
         yield return null;
+
+        // 刀光拖尾：蓄力释放挥砍开始
+        StartWeaponTrail();
 
         var releaseState = animator.GetCurrentAnimatorStateInfo(attackLayerIndex);
         float animLength = releaseState.length;
@@ -732,6 +731,13 @@ public class MeeleFighter : MonoBehaviour
 
         while (timer < animLength)
         {
+            // 顿帧期间计时器暂停
+            if (!isInHitStop)
+            {
+                timer += Time.deltaTime;
+            }
+            float normTime = Mathf.Clamp01(timer / animLength);
+
             // 连招检查：超过 minComboWindow 后消费缓存的下一招
             if (timer >= minComboWindow && bufferedMove != null && HasAnyNextMove(currentMove))
             {
@@ -744,17 +750,14 @@ public class MeeleFighter : MonoBehaviour
                 yield break;
             }
 
-            timer += Time.deltaTime;
-            float normTime = Mathf.Clamp01(timer / animLength);
-
             if (!impactActive && normTime >= impactStart / animLength && normTime <= impactEnd / animLength)
             {
                 impactActive = true;
                 IsHyperArmor = true;
 
                 CameraController camCtrl = Camera.main?.GetComponent<CameraController>();
-                if (chargeLevel == 2) camCtrl?.TriggerTier2ChargeShake();
-                else if (chargeLevel >= 3) camCtrl?.TriggerHeavySlashImpact(enemyPos);
+                if (chargeLevel >= 2) camCtrl?.TriggerHeavySlashImpact(enemyPos);
+                else camCtrl?.TriggerTier2ChargeShake();
 
                 if (activeWeapon != null) activeWeaponCollider = activeWeapon.GetComponentInChildren<Collider>(true);
 
@@ -780,22 +783,9 @@ public class MeeleFighter : MonoBehaviour
             yield return null;
         }
 
-        if (chargeLevel >= 3)
-        {
-            AttackData secondAttack = GetAttackDataByAnimName("ChargeCombo");
-            if (secondAttack == null) secondAttack = GetAttackDataByMoveID("ChargeCombo");
-            if (secondAttack != null)
-            {
-                if (activeWeaponCollider) activeWeaponCollider.enabled = false;
-                canDamageThisAttack = true;
-                yield return StartCoroutine(PerformMove(secondAttack));
-                yield break;
-            }
-        }
-
         IsHyperArmor = false;
         EndAction();
-        lastChargeEndTime = Time.time;   // ��¼��ȴ
+        lastChargeEndTime = Time.time;   // 记录冷却
         IsCurrentAttackHeavy = false;
         currentMove = null;
 
@@ -809,7 +799,7 @@ public class MeeleFighter : MonoBehaviour
         }
     }
     /// <summary>
-    /// ȡ����ǰ���������ͷŹ���
+    /// 取消当前攻击或蓄力释放攻击
     /// </summary>
     public void CancelCharge()
     {
@@ -817,18 +807,17 @@ public class MeeleFighter : MonoBehaviour
         IsCharging = false;
 
         if (chargeLevel2Effect != null) chargeLevel2Effect.SetActive(false);
-        if (chargeLevel3Effect != null) chargeLevel3Effect.SetActive(false);
-        // ֹͣ���й������Э��
+        // 停止所有攻击协程
         if (currentMoveCoroutine != null)
         {
             StopCoroutine(currentMoveCoroutine);
             currentMoveCoroutine = null;
         }
 
-        // ֹͣ MeeleFighter ������Э�̣�ȷ�� ChargeAttack �� while ѭ��Ҳ��ɱ��
+        // 停止 MeeleFighter 的其他协程，确保 ChargeAttack 的 while 循环也被杀死
         StopAllCoroutines();
 
-        // ����״̬
+        // 重置状态
         IsCurrentAttackHeavy = false;
         InAction = false;
         currentMove = null;
@@ -837,14 +826,17 @@ public class MeeleFighter : MonoBehaviour
         if (activeWeaponCollider != null)
             activeWeaponCollider.enabled = false;
 
-        // �ָ�����
+        // 刀光拖尾：蓄力取消
+        StopWeaponTrail();
+
+        // 恢复动画
         animator.speed = 1f;
         animator.SetLayerWeight(attackLayerIndex, 0f);
         animator.Play("Empty", attackLayerIndex);
     }
 
     /// <summary>
-    /// ���ù������Σ��´ι����ӵ�һ�ο�ʼ
+    /// 重置连招，下次攻击从第一击开始
     /// </summary>
     public void ResetAttackCombo()
     {
@@ -866,14 +858,38 @@ public class MeeleFighter : MonoBehaviour
         lastMoveID = move.MoveID;
         InAction = true;
         CanBeInterrupted = false;
+
+        // 停掉旧攻击的退出协程，防止它抢 Attack Layer 权重
+        if (exitSmoothCoroutine != null)
+        {
+            StopCoroutine(exitSmoothCoroutine);
+            exitSmoothCoroutine = null;
+        }
+
         animator.applyRootMotion = true;
         animator.SetLayerWeight(attackLayerIndex, 1f);
-        animator.CrossFade(move.AnimName, 0.1f, attackLayerIndex);
-        yield return new WaitForSeconds(0.15f);
+        // ★ 过渡 0.1→0.05：连招隐式过渡时长 = 0.05×源长度（更短），
+        //   减少"IsName 等待吃掉目标窗口起点"（2-1 窗口跳过）与收尾卡顿（④）
+        animator.CrossFade(move.AnimName, 0.05f, attackLayerIndex);
+
+        // ★ 等目标动画真正成为当前状态（替代固定 0.15s 等待 + 单点采样）
+        // 修复：顿帧/过渡未完成时采到 Empty(无clip,length=0) → yield break 攻击静默作废
+        float enterWait = 0f;
+        while (!animator.GetCurrentAnimatorStateInfo(attackLayerIndex).IsName(move.AnimName))
+        {
+            enterWait += Time.unscaledDeltaTime;
+            if (enterWait > 0.5f) break;   // 超时兜底：状态名不匹配时不再死等
+            yield return null;
+        }
         isCommittingToAttack = false;
 
+        // 刀光拖尾：挥砍开始
+        StartWeaponTrail();
+
+        // 状态就绪后采样 clip 长度（IsName 成立后取到的必是目标状态）
         var state = animator.GetCurrentAnimatorStateInfo(attackLayerIndex);
-        if (state.length < 0.02f) yield break;
+        float stateLength = state.length;
+        if (stateLength < 0.02f) stateLength = 1f;   // 兜底：超时未进入时按 1s 走完流程
         float timer = 0f;
         bool impactActive = false;
 
@@ -883,17 +899,28 @@ public class MeeleFighter : MonoBehaviour
             hitbox?.PlaySwingSound();
         }
 
-        while (timer < state.length)
+        while (timer < stateLength)
         {
-            timer += Time.deltaTime;
-            float normTime = Mathf.Clamp01(timer / state.length);
+            // 顿帧期间计时器暂停，动画时间自然延长（卡肉感）
+            if (!isInHitStop)
+            {
+                timer += Time.deltaTime;
+            }
 
-            // �������ڣ���һ���� minComboWindow�������μӳ� 1.5 ��
+            // ★ 伤害窗口用动画真实进度驱动（与刀锋对齐；顿帧时 normalizedTime 冻结=碰撞体保持开启）
+            AnimatorStateInfo curState = animator.GetCurrentAnimatorStateInfo(attackLayerIndex);
+            float animNorm;
+            if (curState.IsName(move.AnimName))
+                animNorm = Mathf.Min(curState.normalizedTime, 1f);   // 播完不回绕，避免窗口重开
+            else
+                animNorm = Mathf.Clamp01(timer / stateLength);       // 超时兜底：退回本地计时
+
+            // 连招窗口，第一招使用 minComboWindow，后续招数乘以 1.5 倍
             float effectiveWindow = minComboWindow;
             if (currentMove != null && !string.IsNullOrEmpty(currentMove.MoveID) && currentMove.MoveID != "Attack1")
                 effectiveWindow = minComboWindow * 1.5f;
 
-            if ((move.MoveID == "Combo2" || move.MoveID == "Slash3") && timer >= state.length * 0.95f)
+            if ((move.MoveID == "Combo2" || move.MoveID == "Slash3") && animNorm >= 0.95f)
             {
                 animator.speed = 0.5f;
             }
@@ -909,7 +936,7 @@ public class MeeleFighter : MonoBehaviour
                 yield break;
             }
 
-            if (!impactActive && normTime >= move.ImpactStartTime && normTime <= move.ImpactEndTime)
+            if (!impactActive && animNorm >= move.ImpactStartTime && animNorm <= move.ImpactEndTime)
             {
                 impactActive = true;
 
@@ -918,22 +945,41 @@ public class MeeleFighter : MonoBehaviour
 
                 if (activeWeaponCollider)
                 {
+                    activeWeaponCollider.enabled = false;   // 先关再开，强制触发 OnTriggerEnter
                     activeWeaponCollider.enabled = true;
                     var weaponHitbox = activeWeaponCollider.GetComponent<PlayerWeaponHitbox>();
                     if (weaponHitbox != null)
+                    {
                         weaponHitbox.damage = move.Damage;
+                        weaponHitbox.ResetHitState();          // 清命中记录
+                        weaponHitbox.ForceClearHitRecord();    // 清帧缓存
+                    }
                 }
             }
-            else if (impactActive && normTime > move.ImpactEndTime)
+            else if (impactActive && animNorm > move.ImpactEndTime)
             {
                 impactActive = false;
                 if (activeWeaponCollider) activeWeaponCollider.enabled = false;
             }
 
+            // ★ 动画真实播完（或状态切走）→ 立即结束循环。
+            //   修复：timer 起点比动画晚一个过渡时长，若只等 timer 会"动画已收招但仍锁 InAction 0.15~0.25s"
+            //   （攻击后摇后原地卡、闪避无法取消后摇、卡顿无法打断——④③同根）
+            if (curState.IsName(move.AnimName))
+            {
+                if (curState.normalizedTime >= 1f) break;
+            }
+            else
+            {
+                break;   // 状态被切走（SmoothExit/外部打断）→ 不再死等
+            }
+
             yield return null;
         }
 
-        animator.speed = 1f;   // �ָ�
+        // 顿帧期间不强制恢复速度，让 PlayerHitStopRoutine 自己处理
+        if (!isInHitStop)
+            animator.speed = 1f;
         EndAction();
         IsCurrentAttackHeavy = false;
 
@@ -954,14 +1000,20 @@ public class MeeleFighter : MonoBehaviour
     private void EndAction()
     {
         InAction = false;
+        canDamageThisAttack = false;               // ★ 攻击结束强制清伤害锁
+        isCommittingToAttack = false;              // ★ 解除提交锁定
+
+        // 刀光拖尾：挥砍结束
+        StopWeaponTrail();
+
         if (activeWeaponCollider) activeWeaponCollider.enabled = false;
         animator.applyRootMotion = false;
-        // ����ƽ������ Idle ��Э�̣������������㹥����
-        StartCoroutine(SmoothExitAttackLayer());
+        // 平滑退出 Attack Layer（在 Idle 和 Combo2/Slash3 之间平滑过渡）
+        exitSmoothCoroutine = StartCoroutine(SmoothExitAttackLayer());
     }
     private IEnumerator SmoothExitAttackLayer()
     {
-        // �� Combo2 �� Slash3 ����β�� Idle �������Ҫ������������������
+        // 对于 Combo2 或 Slash3 的收尾与 Idle 之间需要更长的过渡时间
         float fadeDuration = (lastMoveID == "Combo2" || lastMoveID == "Slash3") ? 0.25f : 0.1f;
 
         if (animator.HasState(attackLayerIndex, Animator.StringToHash("Empty")))
@@ -988,6 +1040,7 @@ public class MeeleFighter : MonoBehaviour
         lastMoveID = "";
         yield return null;
         isCommittingToAttack = false;
+        exitSmoothCoroutine = null;
     }
     private IEnumerator BlockRoutine()
     {
@@ -1013,7 +1066,6 @@ public class MeeleFighter : MonoBehaviour
         }
 
         SwitchToLeftWeapon();
-        SwitchToLeftWeapon();
         // 强制确认左手显示，右手隐藏
         if (weaponRight) weaponRight.SetActive(false);
         if (weaponLeft) weaponLeft.SetActive(true);
@@ -1030,13 +1082,28 @@ public class MeeleFighter : MonoBehaviour
         yield return new WaitForSeconds(0.15f);
         animator.SetBool("isBlocking", true);
 
-        while (IsBlocking) yield return null;
+        while (IsBlocking)
+        {
+            // ★ 怪猎式：格挡持续消耗体力（PlayerStamina.TryBlockTick）；体力耗尽 → 解除格挡并收盾（力竭动画由 Consume 内部触发）
+            PlayerStamina stamina = GetComponent<PlayerStamina>();
+            if (stamina != null && !stamina.TryBlockTick())
+            {
+                IsBlocking = false;
+                BlockStartTime = -1f;
+                animator.SetBool("isBlocking", false);
+                animator.ResetTrigger("BlockStart");
+                isBlockCoroutineActive = false;
+                StartCoroutine(EndBlockRoutine());
+                yield break;
+            }
+            yield return null;
+        }
         isBlockCoroutineActive = false;
     }
 
     private IEnumerator EndBlockRoutine()
     {
-        IsBlocking = false; 
+        IsBlocking = false;
         IsHyperArmor = false;
         BlockStartTime = -1f;
         IsInBlockRecovery = true;
@@ -1049,30 +1116,36 @@ public class MeeleFighter : MonoBehaviour
             SwitchToRightWeapon();
         lastBlockEndTime = Time.time;
         IsInBlockRecovery = false;
-        animator.applyRootMotion = false;           // �� ����һ�Σ���ֹ�������ط�����
+        animator.applyRootMotion = false;           // 再次锁定移动，防止惯性滑动
         if (playerController != null)
             playerController.LockMovement(0.4f);
     }
-    private void OnAnimatorMove()
-    {
-        if (animator.applyRootMotion && InAction)
-            characterController.Move(animator.deltaPosition);
-    }
+    // ★ 根运动应用已统一迁移到 PlayerController.OnAnimatorMove（applyRootMotion=true 时经 CharacterController 应用），
+    //   这里不再定义，避免与 PlayerController 重复应用导致双倍位移。
 
-    // ===================== �ܻ��뵯����ֱ�Ӳ��Ű棩 =====================
+    // ===================== 受击与弹刀（直接播放版） =====================
     public void PlayHitReaction(Vector3 hitDirectionWorld)
     {
         playerController?.ForceEndInvincibility();
 
-        if (hitReactionCoroutine != null) StopCoroutine(hitReactionCoroutine);
-        if (bounceCoroutine != null) StopCoroutine(bounceCoroutine);
+        // 停止所有协程（含嵌套的 ChargeAttack/PerformMove 子协程与顿帧协程），
+        // 防止嵌套攻击协程在受击后继续运行导致玩家卡死
+        StopAllCoroutines();
 
-        if (currentMoveCoroutine != null)
-        {
-            StopCoroutine(currentMoveCoroutine);
-            currentMoveCoroutine = null;
-        }
+        // 恢复动画速度与顿帧标志（防止顿帧协程被误杀后残留 animator.speed=0 / isInHitStop=true）
+        animator.speed = 1f;
+        isInHitStop = false;
+        playerHitStopCoroutine = null;
+
+        // 清空协程引用
+        currentMoveCoroutine = null;
+        hitReactionCoroutine = null;
+        bounceCoroutine = null;
+
         if (activeWeaponCollider) activeWeaponCollider.enabled = false;
+
+        // ★ 受击/弹刀立即清零伤害锁：即使武器碰撞体未及时禁用，hit 动画期间也不会再造成伤害
+        canDamageThisAttack = false;
 
         IsStaggering = true;
         InAction = true;
@@ -1083,7 +1156,7 @@ public class MeeleFighter : MonoBehaviour
         animator.SetLayerWeight(attackLayerIndex, 0f);
         animator.Play("Empty", attackLayerIndex);
 
-        // �����ƶ���������ֹ Any State ���߶���
+        // 清除移动输入，防止 Any State 过渡到移动动画
         animator.SetFloat("moveAmount", 0f);
         animator.ResetTrigger("TakeHit");
         animator.SetInteger("HitDirection", -1);
@@ -1098,15 +1171,24 @@ public class MeeleFighter : MonoBehaviour
     {
         playerController?.ForceEndInvincibility();
 
-        if (hitReactionCoroutine != null) StopCoroutine(hitReactionCoroutine);
-        if (bounceCoroutine != null) StopCoroutine(bounceCoroutine);
+        // 停止所有协程（含嵌套的 ChargeAttack/PerformMove 子协程与顿帧协程），
+        // 防止嵌套攻击协程在弹刀后继续运行导致玩家卡死
+        StopAllCoroutines();
 
-        if (currentMoveCoroutine != null)
-        {
-            StopCoroutine(currentMoveCoroutine);
-            currentMoveCoroutine = null;
-        }
+        // 恢复动画速度与顿帧标志（防止顿帧协程被误杀后残留 animator.speed=0 / isInHitStop=true）
+        animator.speed = 1f;
+        isInHitStop = false;
+        playerHitStopCoroutine = null;
+
+        // 清空协程引用
+        currentMoveCoroutine = null;
+        hitReactionCoroutine = null;
+        bounceCoroutine = null;
+
         if (activeWeaponCollider) activeWeaponCollider.enabled = false;
+
+        // ★ 受击/弹刀立即清零伤害锁：即使武器碰撞体未及时禁用，hit 动画期间也不会再造成伤害
+        canDamageThisAttack = false;
 
         IsStaggering = true;
         InAction = true;
@@ -1150,23 +1232,33 @@ public class MeeleFighter : MonoBehaviour
         PlayerController pc = GetComponent<PlayerController>();
         if (pc != null)
         {
-            pc.ClearStaggerRecoveryTimer();   // �� ֱ�����㣬��������0.15�붳��
+            // 直接清零硬直恢复计时器，不再有 0.15 秒冻结
+            pc.ClearStaggerRecoveryTimer();
             pc.LockMovement(0f);
-            pc.ForceUnlockDodge();            // �� �ڲ��Ѱ��� StopAllCoroutines
+            // 内部已包含 StopAllCoroutines
+            pc.ForceUnlockDodge();
         }
 
-        // ���Ᵽ�գ�������������
+        // 保险，双重解锁闪避
         StartCoroutine(ReEnableDodgeImmediately());
 
         IsStaggering = false;
         InAction = false;
         CanBeInterrupted = true;
+        isCommittingToAttack = false;         // 防止攻击协程被暴力打断后残留
+        IsCharging = false;                   // 防止蓄力被打断后残留
+        CurrentChargeLevel = 0;               // 重置蓄力等级
         currentMove = null;
         bufferedMove = null;
         IsCurrentAttackHeavy = false;
 
         if (CurrentCombatState == CombatState.Drawn)
+        {
             SwitchToRightWeapon();
+            // 受击时武器碰撞体被关了，这里恢复
+            if (activeWeaponCollider != null)
+                activeWeaponCollider.enabled = true;
+        }
         else
             SwitchToBackWeapon();
 
@@ -1185,7 +1277,7 @@ public class MeeleFighter : MonoBehaviour
     }
 
     /// <summary>
-    /// ���������ľ�ƣ������
+    /// 播放力竭动画
     /// </summary>
     public void PlayExhausted()
     {
@@ -1194,7 +1286,8 @@ public class MeeleFighter : MonoBehaviour
         IsStaggering = true;
         InAction = true;
 
-        animator.Play("Exhausted", 0, 0f);
+        // ★ 玩家 controller 中力竭状态名是 OutOfBreath（不是 Exhausted）——原名播放失败导致力竭完全没有动画
+        animator.Play("OutOfBreath", 0, 0f);
         StartCoroutine(RecoverFromExhausted());
     }
 
@@ -1203,6 +1296,9 @@ public class MeeleFighter : MonoBehaviour
         yield return new WaitForSeconds(2f);
         IsStaggering = false;
         InAction = false;
+        // ★ OutOfBreath 状态无退出过渡（m_Transitions 为空），恢复时必须手动切回移动混合树，防止卡死在喘息动画
+        if (animator.HasState(0, Animator.StringToHash("Blend Tree")))
+            animator.Play("Blend Tree", 0, 0f);
     }
     private string GetHitAnimationName(Vector3 hitDirectionWorld)
     {
@@ -1232,6 +1328,77 @@ public class MeeleFighter : MonoBehaviour
         animator.applyRootMotion = true;
     }
 
+    // ═══════════════════════════════════════
+    //  顿帧系统：玩家动画同步冻结（MHW大剑卡肉感核心）
+    // ═══════════════════════════════════════
+    private Coroutine playerHitStopCoroutine;
+    private bool isInHitStop = false;
+
+    /// <summary>
+    /// 命中时冻结玩家动画，与敌人同步卡肉
+    /// </summary>
+    public void TriggerPlayerHitStop(float duration)
+    {
+        if (duration <= 0f) return;
+        if (playerHitStopCoroutine != null)
+        {
+            StopCoroutine(playerHitStopCoroutine);
+            isInHitStop = false;      // 重置标记，防止残留
+        }
+        playerHitStopCoroutine = StartCoroutine(PlayerHitStopRoutine(duration));
+    }
+
+    private IEnumerator PlayerHitStopRoutine(float duration)
+    {
+        isInHitStop = true;
+        animator.speed = 0f;
+
+        yield return new WaitForSecondsRealtime(duration);
+
+        animator.speed = 1f;
+        isInHitStop = false;
+        playerHitStopCoroutine = null;
+    }
+
+    // ═══════════════════════════════════════
+    //  Blade Afterimage (MHW-style motion trail)
+    // ═══════════════════════════════════════
+    [Header("刀光残影")]
+    [SerializeField] private Material trailMaterial;       // 拖进去一个透明材质（如 Glow.mat）
+    [SerializeField] private float trailWidth = 0.3f;       // 刀光宽度
+    [SerializeField] private float trailTime = 0.08f;       // 残影残留时间
+
+    private TrailRenderer weaponTrail;
+
+    private void StartWeaponTrail()
+    {
+        if (activeWeapon == null) return;
+
+        if (weaponTrail == null)
+        {
+            weaponTrail = activeWeapon.AddComponent<TrailRenderer>();
+            weaponTrail.autodestruct = false;
+            weaponTrail.minVertexDistance = 0.02f;
+            weaponTrail.emitting = false;
+        }
+
+        weaponTrail.time = trailTime;
+        weaponTrail.startWidth = trailWidth;
+        weaponTrail.endWidth = 0f;
+        if (trailMaterial != null)
+            weaponTrail.material = trailMaterial;
+
+        weaponTrail.Clear();
+        weaponTrail.emitting = true;
+        weaponTrail.enabled = true;
+    }
+
+    private void StopWeaponTrail()
+    {
+        if (weaponTrail != null)
+            weaponTrail.emitting = false;
+    }
+
     public void ForceHideWeapon()
     {
         if (weaponRight) weaponRight.SetActive(false);
@@ -1251,10 +1418,7 @@ public class MeeleFighter : MonoBehaviour
     }
 
     /// <summary>
-    /// ��ʼ�������� PlayerController ����
-    /// </summary>
-    /// <summary>
-    /// ��ʼ�������� PlayerController ����
+    /// 开始处决（由 PlayerController 调用）
     /// </summary>
     public void StartExecution(EnemyController target)
     {
@@ -1264,10 +1428,9 @@ public class MeeleFighter : MonoBehaviour
 
     private IEnumerator ExecutionRoutine(EnemyController target)
     {
-        Debug.Log("[����] ExecutionRoutine ��ʼ");
         isExecuting = true;
 
-        // ������Ҳ���
+        // 锁定玩家动作
         InAction = true;
         CanBeInterrupted = false;
         IsHyperArmor = true;
@@ -1280,61 +1443,56 @@ public class MeeleFighter : MonoBehaviour
         if (activeWeaponCollider != null)
             activeWeaponCollider.enabled = false;
 
-        // ֹͣ Boss �Ķ���Э�̣���ֹ��ÿ֡�� Boss ����ԭ��
+        // 停止 Boss 的移动协程，防止每帧把 Boss 拉回原位
         BossPhaseManager phaseMgr = target.GetComponent<BossPhaseManager>();
         if (phaseMgr != null)
             phaseMgr.StopExecutionSequence();
 
-        // ֹͣ Boss һ����Ϊ
+        // 停止 Boss 一般行为
         target.StopCurrentAttack();
         target.EnableWeaponHitBox(false, false);
-        target.HasSuperArmor = true;
         target.DisableAttackLayer();
 
-        // �ⶳ Boss
+        // 解冻 Boss
         target.isExecutionFrozen = false;
 
         CharacterController cc = target.GetComponent<CharacterController>();
         if (cc != null) cc.enabled = true;
 
-        // �� ǿ�ƿ������˶����ö���λ����Ч
+        // 强制开启根运动，让动画位移生效
         target.anim.applyRootMotion = true;
         target.anim.speed = 1f;
         target.anim.Rebind();
         target.anim.Update(0);
 
-        // �������в㣬ֻ���� Base Layer
+        // 重置动画器所有层，只保留 Base Layer
         for (int i = 1; i < target.anim.layerCount; i++)
             target.anim.SetLayerWeight(i, 0f);
 
-        // ���ű���������
+        // 播放被处决动画
         target.anim.Play(bossBeExecutionAnimName, 0, 0f);
         target.anim.Update(0);
 
-        // ��֤
+        // 验证
         AnimatorStateInfo bossState = target.anim.GetCurrentAnimatorStateInfo(0);
-        Debug.Log($"[����] Boss ����: {bossState.IsName(bossBeExecutionAnimName)}, speed={target.anim.speed}");
 
         if (bossState.normalizedTime < 0.01f)
         {
-            Debug.LogWarning("[����] normalizedTime Ϊ 0��ǿ���ƶ�����");
             target.anim.Play(bossBeExecutionAnimName, 0, 0.01f);
             target.anim.Update(0);
         }
 
-        // ������Ҵ�������
+        // 播放玩家处决动画
         animator.SetLayerWeight(attackLayerIndex, 1f);
         animator.Play(executionAnimName, attackLayerIndex, 0f);
         animator.Update(0);
-        Debug.Log($"[����] ��Ҷ��� {executionAnimName} �Ѳ���");
 
-        // ��ȡ������ʵ����
+        // 获取动画实际长度
         float playerLen = GetClipLength(animator, executionAnimName);
         float bossLen = GetClipLength(target.anim, bossBeExecutionAnimName);
         float waitTime = Mathf.Max(playerLen, bossLen, 0.1f);
-        Debug.Log($"[����] �ȴ�ʱ��: {waitTime}s");
 
-        // �ȴ��ڼ䱣��������������
+        // 等待期间保持动画播放
         float timer = 0f;
         while (timer < waitTime)
         {
@@ -1343,14 +1501,13 @@ public class MeeleFighter : MonoBehaviour
             AnimatorStateInfo state = target.anim.GetCurrentAnimatorStateInfo(0);
             if (!state.IsName(bossBeExecutionAnimName))
             {
-                Debug.LogWarning("[����] ���������ߣ����²���");
                 target.anim.Play(bossBeExecutionAnimName, 0, state.normalizedTime);
             }
             timer += 0.1f;
             yield return new WaitForSeconds(0.1f);
         }
 
-        // Boss ����
+        // Boss 死亡
         if (target != null)
         {
             EnemyHealth bossHealth = target.GetComponent<EnemyHealth>();
@@ -1358,7 +1515,7 @@ public class MeeleFighter : MonoBehaviour
                 bossHealth.ForceDeath();
         }
 
-        // �ָ����״̬
+        // 恢复玩家状态
         IsHyperArmor = false;
         InAction = false;
         isExecuting = false;

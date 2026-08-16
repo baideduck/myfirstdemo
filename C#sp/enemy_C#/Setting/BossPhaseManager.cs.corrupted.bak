@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using UnityEngine;
 using UnityEngine.Playables;
 using System;
@@ -61,10 +61,6 @@ public class BossPhaseManager : MonoBehaviour
     public BossPhase CurrentPhase { get; private set; } = BossPhase.PhaseOne_Test;
     public event Action<BossPhase> OnPhaseChanged;
 
-    // ★ 阶段参数暴露（供伤害倍率/力竭缩短接线，阶段4）
-    public float PhaseTwoDamageMult => phaseTwoDamageMult;
-    public float PhaseTwoExhaustShorten => phaseTwoExhaustShorten;
-
     private EnemyHealth enemyHealth;
     private EnemyController enemyController;
     private BossStamina bossStamina;
@@ -101,7 +97,6 @@ public class BossPhaseManager : MonoBehaviour
     public void OnTakeDamageAfterThreshold()
     {
         if (enemyHealth == null) return;
-        if (isPhaseTransitioning) return;   // ★ 转场中禁止再触发其他转场（防止三阶段角力打断二阶段转场流程）
         float hpPercent = enemyHealth.currentHealth / enemyHealth.maxHealth;
 
         if (!phaseTwoTriggered && hpPercent <= phaseTwoThreshold)
@@ -117,8 +112,8 @@ public class BossPhaseManager : MonoBehaviour
         }
     }
 
-    [Header("二阶段转场")]
-    [SerializeField] private float disappearDuration = 1.5f;   // 消失后到重新出现的等待时长（可调）
+    [Header("浜岄樁娈佃浆鍦?)]
+    [SerializeField] private float disappearDuration = 1.5f;   // 娑堝け鍚庡埌閲嶆柊鍑虹幇鐨勭瓑寰呮椂闀匡紙鍙皟锛?
     // ===================== Phase two - retreat =====================
     private void TriggerPhaseTwo()
     {
@@ -130,7 +125,7 @@ public class BossPhaseManager : MonoBehaviour
         enemyHealth.currentHealth = thresholdHP;
 
         enemyController.shouldAbortAttack = true;
-        enemyController.CancelOpeningSequence();   // 终止开场流程，防止 ToFight 跨转场/首招突刺残留
+        enemyController.CancelOpeningSequence();   // 缁堟寮€鍦烘祦绋嬶紝闃叉 ToFight 璺ㄨ浆鍦?棣栨嫑绐佸埡娈嬬暀
         StartCoroutine(PhaseTwoRetreat());
     }
 
@@ -139,42 +134,38 @@ public class BossPhaseManager : MonoBehaviour
         enemyController.StopCurrentAttack();
         enemyController.EnableWeaponHitBox(false, false);
         enemyController.DisableAttackLayer();
+        enemyController.ChangeState(EnemyStates.Idle);
 
-        // ★ 清理受击/格挡残留：停受击协程、清 Hit Layer 权重、复位动画速度与 Trigger/Bool，
-        //   防止转场动画被受击动画混合、被 IdleState 强切、被 AnyState→Block_L/受击过渡拉走
-        enemyController.combat.CancelHitReaction();
-        enemyController.anim.speed = 1f;
-        enemyController.anim.ResetTrigger("BlockHit");
-        enemyController.anim.SetBool("isHit", false);
-        enemyController.anim.SetBool("isExhausted", false);   // ★ 力竭残留：清除 isExhausted，防止 Common→Exhausted_Start 过渡拉走转场动画
-        enemyController.TransitionChangeState(EnemyStates.Idle);   // 转场守卫放行
-
-        // ── 1. Block_Hit：共 51 帧，播放到第 45 帧后切换 ──
-        // ★ 强制重置 Animator（清除力竭/受击/过渡残留），确保 Play 立即生效
-        enemyController.anim.Rebind();
-        enemyController.anim.Update(0f);
-        enemyController.anim.speed = 1f;
-        enemyController.DisableAttackLayer();   // Rebind 会把 Attack Layer 权重重置为默认值，需重新清空攻击层
+        // 鈹€鈹€ 1. Block_Hit锛氬叡 51 甯э紝鎾斁鍒扮 45 甯у悗鍒囨崲 鈹€鈹€
         enemyController.anim.Play("Block_Hit", 0, 0f);
-        enemyController.anim.Update(0f);   // 立即评估，确保状态切换生效
+        Debug.Log($"[TransitionDBG] Block_Hit played | isName=" + enemyController.anim.GetCurrentAnimatorStateInfo(0).IsName("Block_Hit") + " | norm=" + enemyController.anim.GetCurrentAnimatorStateInfo(0).normalizedTime);
+        enemyController.anim.Update(0f);
         const float BLOCK_HIT_TOTAL = 51f;
         const float BLOCK_HIT_CUT_FRAME = 45f;
         float blockHitStart = Time.time;
-        while ((!enemyController.anim.GetCurrentAnimatorStateInfo(0).IsName("Block_Hit")
-                || enemyController.anim.GetCurrentAnimatorStateInfo(0).normalizedTime < BLOCK_HIT_CUT_FRAME / BLOCK_HIT_TOTAL)
-               && Time.time - blockHitStart < 1.5f)   // 超时保险：异常时不超过 1.5s
+        while (enemyController.anim.GetCurrentAnimatorStateInfo(0).normalizedTime < BLOCK_HIT_CUT_FRAME / BLOCK_HIT_TOTAL
+               && Time.time - blockHitStart < 1.5f)   // 瓒呮椂淇濋櫓锛氬紓甯告椂涓嶈秴杩?1.5s
             yield return null;
 
-        // ── 2. 播 Roll（66 帧，Root Motion 驱动位移；动画本身是向后滚 = 自动远离玩家，无需调整朝向）──
-        enemyController.lockFacing = true;                 // Roll 期间禁止 Idle FacePlayer 转动朝向
+        // 鈹€鈹€ 2. 鏈濆悜杩滅鐜╁鐨勬柟鍚戯紝鎾?Roll锛?6 甯э紝Root Motion 椹卞姩浣嶇Щ锛屾粴澶氳繙灏卞杩滐級鈹€鈹€
+        Vector3 awayDir = Vector3.zero;
+        if (player != null)
+        {
+            awayDir = (enemyController.transform.position - player.transform.position).normalized;
+            awayDir.y = 0f;
+        }
+        if (awayDir.sqrMagnitude < 0.0001f)
+            awayDir = -enemyController.transform.forward;
+        enemyController.transform.rotation = Quaternion.LookRotation(awayDir);
+
+        enemyController.lockFacing = true;                 // Roll 鏈熼棿绂佹 Idle FacePlayer 杞姩鏈濆悜
         enemyController.anim.applyRootMotion = true;
         enemyController.anim.Play("Roll", 0, 0f);
-        enemyController.anim.Update(0f);   // 立即评估
-        yield return new WaitForSeconds(66f / 60f);        // Roll 共 66 帧
-        enemyController.anim.applyRootMotion = false;
+        Debug.Log($"[TransitionDBG] Roll played | isName=" + enemyController.anim.GetCurrentAnimatorStateInfo(0).IsName("Roll") + " | pos=" + enemyController.transform.position);
+        yield return new WaitForSeconds(66f / 60f);        // Roll 鍏?66 甯?        enemyController.anim.applyRootMotion = false;
         enemyController.lockFacing = false;
 
-        // ── 3. 计算出生点（20~30m 随机位置，保留原逻辑）──
+        // 鈹€鈹€ 3. 璁＄畻鍑虹敓鐐癸紙20~30m 闅忔満浣嶇疆锛屼繚鐣欏師閫昏緫锛夆攢鈹€
         Vector3 spawnPos = Vector3.zero;
         if (player != null)
         {
@@ -191,7 +182,7 @@ public class BossPhaseManager : MonoBehaviour
                 spawnPos.y = hit.point.y;
         }
 
-        // ── 4. 隐藏 → 瞬移到出生点 → 等一下 → 重新出现（出现时强制 Idle）──
+        // 鈹€鈹€ 4. 闅愯棌 鈫?鐬Щ鍒板嚭鐢熺偣 鈫?绛変竴涓?鈫?閲嶆柊鍑虹幇锛堝嚭鐜版椂寮哄埗 Idle锛夆攢鈹€
         HideBossVisual();
         enemyController.transform.position = spawnPos;
         enemyController.transform.rotation = Quaternion.identity;
@@ -199,11 +190,11 @@ public class BossPhaseManager : MonoBehaviour
         ShowBossVisual();
         enemyController.ChangeState(EnemyStates.Idle);
 
-        // ── 5. 二阶段出场待命（发现玩家后播 Buff，逻辑在 PostSpawnSequence）──
+        // 鈹€鈹€ 5. 浜岄樁娈靛嚭鍦哄緟鍛斤紙鍙戠幇鐜╁鍚庢挱 Buff锛岄€昏緫鍦?PostSpawnSequence锛夆攢鈹€
         StartCoroutine(PostSpawnSequence(spawnPos));
     }
 
-    // 隐藏 Boss 视觉（不 SetActive，避免杀死转场协程）
+    // 闅愯棌 Boss 瑙嗚锛堜笉 SetActive锛岄伩鍏嶆潃姝昏浆鍦哄崗绋嬶級
     private void HideBossVisual()
     {
         Renderer[] renderers = GetComponentsInChildren<Renderer>(true);
@@ -244,10 +235,8 @@ public class BossPhaseManager : MonoBehaviour
             currentBurstAura = Instantiate(burstPhaseAuraEffect, transform);
 
         enemyController.shouldAbortAttack = false;
-        enemyController.TransitionChangeState(EnemyStates.Idle);   // 出现后强制 Idle 待命（转场守卫放行）
-        isPhaseTransitioning = false;                              // 转场完成，恢复决策
-        enemyController.waitForPhaseTwoEngage = true;       // 发现玩家后播放 Buff（类似一阶段 ToFight）
-        yield break;
+        enemyController.ChangeState(EnemyStates.Idle);      // 鍑虹幇鍚庡己鍒?Idle 寰呭懡
+        isPhaseTransitioning = false;                       // 杞満瀹屾垚锛屾仮澶嶅喅绛?        enemyController.waitForPhaseTwoEngage = true;       // 鍙戠幇鐜╁鍚庢挱鏀?Buff锛堢被浼间竴闃舵 ToFight锛?        yield break;
     }
 
     // ===================== Phase three - clash =====================
@@ -270,7 +259,7 @@ public class BossPhaseManager : MonoBehaviour
         if (mf != null) { mf.InAction = true; mf.IsHyperArmor = true; }
         if (pc != null) pc.LockMovement(5f);
 
-        // 把 Boss 拉到玩家面前 3m 处，确保模型位置对齐
+        // 鎶?Boss 鎷夊埌鐜╁闈㈠墠 3m 澶勶紝纭繚妯″瀷浣嶇疆瀵归綈
         Vector3 dirToBossFromPlayer = (enemyController.transform.position - player.transform.position).normalized;
         dirToBossFromPlayer.y = 0;
         if (dirToBossFromPlayer.magnitude > 0.01f)
@@ -286,7 +275,7 @@ public class BossPhaseManager : MonoBehaviour
         if (clashTimeline != null)
         {
             clashTimeline.Play();
-            // 临时 0.1 倍速，用来观察角力节奏
+            // 涓存椂 0.1 鍊嶉€燂紝鐢ㄦ潵瑙傚療瑙掑姏鑺傚
             var rootPlayable = clashTimeline.playableGraph.GetRootPlayable(0);
             rootPlayable.SetSpeed(0.1f);
         }

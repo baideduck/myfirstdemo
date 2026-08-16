@@ -30,11 +30,11 @@ public class EnemyWeapon : MonoBehaviour
         lastHitTarget = null;
     }
 
+    // ★ 由当前判定窗口的招式决定（开窗时记录，而非命中时状态）：
+    //   修复派生链衔接瞬间状态已切到 Combo/Quick → 命中时误判为 Combo → 单次锁失效的竞态
     private bool IsCurrentStateComboLike()
     {
-        return enemy != null && enemy.StateMachine != null &&
-               (enemy.StateMachine.CurrentState is ComboState ||
-                enemy.StateMachine.CurrentState is QuickSlashState);
+        return enemy != null && enemy.combat != null && enemy.combat.IsComboLikeWindow;
     }
 
     /// <summary>
@@ -44,7 +44,12 @@ public class EnemyWeapon : MonoBehaviour
     {
         if (enemy == null || !enabled) return;
         if (!gameObject.activeSelf) return;  // 碰撞体没激活就不检测
+        if (enemy.combat == null) return;    // EnemyCombat 未挂载，跳过
         if (!enemy.canHitThisAttack) return;  // 本招已经命中过了
+        // ★ Combo 窗口：0.3s 冷却限速（物理碰撞路径已有该检查，Update 距离检测路径补充——
+        //   否则 Combo/Quick 在 2m 内每帧判定伤害，远超"多次"预期）
+        if (enemy.combat.IsComboLikeWindow && Time.time - enemy.lastDamageTime < COMBO_COOLDOWN)
+            return;
         if (enemy.StateMachine == null) return;
 
         // 只在攻击状态下检测
@@ -57,6 +62,7 @@ public class EnemyWeapon : MonoBehaviour
         if (!isAttack && !IsCurrentStateComboLike()) return;
 
         // 纯距离检测：武器碰撞体位置到玩家的距离 < 2m
+        if (player == null) { Debug.LogError("[EnemyWeapon] player is null! Tag might be wrong."); return; }
         float dist = Vector3.Distance(transform.position, player.transform.position);
         if (dist > 2f)
         {
@@ -83,8 +89,12 @@ public class EnemyWeapon : MonoBehaviour
             if (IsCurrentStateComboLike())
                 enemy.lastDamageTime = Time.time;
             else
+            {
+                // ★ 非 Combo：命中即锁 + 立即关窗——物理禁用碰撞体，杜绝同一招式窗口内任何二次命中
                 enemy.canHitThisAttack = false;
-            enemy.lastDamageTime = Time.time;
+                enemy.lastDamageTime = Time.time;
+                enemy.combat.EnableWeaponHitBox(false, false);
+            }
         }
     }
 
@@ -122,8 +132,6 @@ public class EnemyWeapon : MonoBehaviour
             if (!enemy.canHitThisAttack)
                 return;
         }
-
-        // 层级筛选
         int otherLayer = other.gameObject.layer;
         int playerLayer = LayerMask.NameToLayer("Player");
         int playerHitboxLayer = LayerMask.NameToLayer("PlayerHitbox");
@@ -159,9 +167,10 @@ public class EnemyWeapon : MonoBehaviour
             }
             else
             {
-                // 非 Combo: 锁住本次攻击，后续触发直接跳过
+                // ★ 非 Combo：命中即锁 + 立即关窗——物理禁用碰撞体，杜绝同一招式窗口内任何二次命中
                 enemy.canHitThisAttack = false;
                 enemy.lastDamageTime = Time.time;
+                enemy.combat.EnableWeaponHitBox(false, false);
             }
         }
     }

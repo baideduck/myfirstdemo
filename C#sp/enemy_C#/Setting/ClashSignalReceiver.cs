@@ -139,7 +139,6 @@ public class ClashSignalReceiver : MonoBehaviour
 
         if (enemyCtrl != null)
         {
-            enemyCtrl.HasSuperArmor = false;
             enemyCtrl.isExecutionFrozen = false;
         }
 

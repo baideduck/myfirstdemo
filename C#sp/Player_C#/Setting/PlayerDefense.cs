@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using UnityEngine;
 
 public class PlayerDefense : MonoBehaviour
@@ -57,11 +57,20 @@ public class PlayerDefense : MonoBehaviour
         // 关闭 Root Motion，防止持刀 idle 动画残留驱动滑步
         if (animator != null) animator.applyRootMotion = false;
 
-        // 恢复移动
+        // ★ 锁定位置 0.2s，防止 Block_Fail → Idle 过渡期间滑步
+        Vector3 lockedPos = transform.position;
         meleeFighter.InAction = false;
+        float lockTime = 0.2f;
+        float elapsed = 0f;
+        while (elapsed < lockTime)
+        {
+            elapsed += Time.deltaTime;
+            transform.position = lockedPos;
+            yield return null;
+        }
 
-        // 锁定移动一小段时间，给 Animator 从 Block_Fail → Drawn idle 过渡时间
-        if (playerController != null) playerController.LockMovement(0.15f);
+        // 锁定移动一小段时间，给 Animator 完整过渡
+        if (playerController != null) playerController.LockMovement(0.2f);
     }
 
     /// <summary>
@@ -91,8 +100,6 @@ public class PlayerDefense : MonoBehaviour
                 OnBlockFailed();
                 if (guardBreakSound != null)
                     AudioSource.PlayClipAtPoint(guardBreakSound, transform.position);
-                if (enemy != null && enemy.isActiveAndEnabled)
-                    enemy.PlayGuardBreakReaction(attackDir);
 
                 if (!meleeFighter.IsHyperArmor)
                     meleeFighter?.PlayHitReaction(attackDir);
@@ -108,10 +115,10 @@ public class PlayerDefense : MonoBehaviour
                     meleeFighter.OnBlockedAttack();
                     if (perfectBlockSound != null)
                         AudioSource.PlayClipAtPoint(perfectBlockSound, transform.position);
-                    if (enemy != null && enemy.isActiveAndEnabled && !enemy.HasSuperArmor)
+                    if (enemy != null && enemy.isActiveAndEnabled)
                     {
                         Vector3 attackDir2 = (transform.position - hitPoint).normalized;
-                        enemy.PlayGuardBreakReaction(attackDir2);
+                        enemy.combat.PlayGuardBreakReaction(attackDir2);
 
                         BossPosture posture = enemy.GetComponent<BossPosture>();
                         BossStamina stamina = enemy.GetComponent<BossStamina>();
@@ -119,6 +126,7 @@ public class PlayerDefense : MonoBehaviour
                         {
                             float drain = stamina.GetCurrentAttackBaseDrain();
                             posture.OnPerfectBlocked(drain);
+                            enemy?.GetComponent<BossComboChain>()?.OnPlayerBlocked(true);
                         }
                     }
                 }
@@ -136,6 +144,7 @@ public class PlayerDefense : MonoBehaviour
                     bossStamina?.ConsumeStamina(BossStamina.StaminaDrainType.Block);
                     meleeFighter.OnBlockedAttack();
                     playerSharpness?.ConsumeBlock();
+                    enemy?.GetComponent<BossComboChain>()?.OnPlayerBlocked(false);
                 }
             }
             return true;

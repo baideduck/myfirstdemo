@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 
 public class IdleState : State<EnemyController>
 {
@@ -50,7 +50,8 @@ public class IdleState : State<EnemyController>
         if (enemy.isExecutionFrozen) return;
 
         // ������ң������κ�λ�ƣ�λ���� DodgeState ͳһ������
-        enemy.FacePlayer();
+        if (!enemy.lockFacing)
+            enemy.FacePlayer();
     }
 
     public override void Exit()

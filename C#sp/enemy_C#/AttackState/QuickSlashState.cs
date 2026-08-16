@@ -1,111 +1,101 @@
 using System.Collections;
 using UnityEngine;
 
-public class QuickSlashState : State<EnemyController>
+/// <summary>
+/// QuickSlashState — 速斩/闪现斩
+/// </summary>
+public class QuickSlashState : AttackStateBase
 {
-    private EnemyController enemy;
-    private bool attackFinished = false;
-    private Coroutine routine;
-
-    [Header("����ʱ����")]
-    public float sheathTime = 3.117f;
-    public float sheathSlowStartTime = 1.5f;     // 慢放起点（Inspector设）
-    public float hitWindowStart = 0f;
-    public float hitWindowDuration = 1.25f;
-    public int damage = 18;
-
-    [Header("��������")]
-    public float slowSpeed = 0.2f;
+    [Header("Timing")]
     public float slowDuration = 0.5f;
+    public float slowSpeed = 0.2f;
+    public float hitWindowDuration = 1.25f;
+    public float sheathTime = 3.117f;
+    public float totalTime = 3.817f;
+
+    [Header("Damage")]
+    public int damage = 18;
+    public bool isGuardBreak;
+
+    [Header("Teleport")]
     public float teleportDistance = 1.5f;
 
-    public override void Enter(EnemyController owner)
-    {
-        if (owner == null) return;
-        enemy = owner;
-        attackFinished = false;
+    [Header("Animation")]
+    public string animBool = "isQuick";
 
-        if (enemy.anim == null)
+    protected override EnemyStates AttackType => EnemyStates.QuickSlash;
+
+    protected override void SetupAnimation()
+    {
+        anim.SetLayerWeight(attackLayer, 1f);
+        anim.SetBool(animBool, true);
+    }
+
+    protected override void CleanupAnimation()
+    {
+        anim.SetBool(animBool, false);
+    }
+
+    protected override IEnumerator AttackRoutine => AttackRoutineImpl();
+
+    IEnumerator AttackRoutineImpl()
+    {
+        float startTime = Time.time;
+
+        // 起手慢放
+        float slowEnd = startTime + slowDuration;
+        while (Time.time < slowEnd)
         {
-            enemy.ChangeState(EnemyStates.Idle);
-            return;
+            if (combat.shouldAbortAttack) yield break;
+            anim.speed = slowSpeed;
+            yield return null;
         }
+        anim.speed = 1f;
+        if (combat.shouldAbortAttack) yield break;
 
-        enemy.AttachWeaponToHand();
-        if (routine != null) enemy.StopCoroutine(routine);
-        routine = enemy.StartCoroutine(QuickSlashRoutine());
-        enemy.RegisterAttackRoutine(routine);
+        // 闪现到玩家前方
+        Vector3 playerPos = controller.GetPlayerPosition();
+        Vector3 dir = (playerPos - controller.transform.position).normalized;
+        dir.y = 0;
+        if (dir.magnitude > 0.01f)
+        {
+            controller.transform.position = playerPos - dir * teleportDistance;
+            controller.transform.rotation = Quaternion.LookRotation(dir);
+        }
+        if (combat.shouldAbortAttack) yield break;
 
-        enemy.anim.SetBool("isQuick", true);
-        enemy.FacePlayer();
-    }
+        // 伤害窗口
+        combat.SetAttackDamage(damage);
+        combat.EnableWeaponHitBox(true, false);
+        float hitEnd = Time.time + hitWindowDuration;
+        while (Time.time < hitEnd)
+        {
+            if (combat.shouldAbortAttack) { combat.EnableWeaponHitBox(false, false); yield break; }
+            // ★ 派生模式：动画到衔接点立即结束判定（先到者，保证连招节奏不被长判定窗口卡住）
+            if (combat.isDerivedMove && AnimAtLinkPoint())
+            {
+                combat.EnableWeaponHitBox(false, false);
+                yield break;
+            }
+            yield return null;
+        }
+        combat.EnableWeaponHitBox(false, false);
+        if (combat.shouldAbortAttack) yield break;
 
-    IEnumerator QuickSlashRoutine()
-    {
-        // ����
-        enemy.anim.speed = slowSpeed;
-        yield return new WaitForSeconds(slowDuration);
+        // 收刀
+        if (combat.isDerivedMove)
+        {
+            // ★ 要求：攻击动画完整播完 → 马上接下一招（不再 0.2s 快速收刀掐断动画）
+            yield return WaitAttackAnimationEnd();
+            yield break;   // 攻击结束，链队列立即接下一招
+        }
+        float wait = Mathf.Max(0, sheathTime - (Time.time - startTime));
+        if (wait > 0) yield return new WaitForSeconds(wait);
 
-        // 闪现（临时关 Root Motion 防覆盖）
-        bool wasRootMotion = enemy.anim.applyRootMotion;
-        enemy.anim.applyRootMotion = false;
-        enemy.anim.speed = 1f;
-        Vector3 playerPos = enemy.GetPlayerPosition();
-        Vector3 dirToPlayer = (playerPos - enemy.transform.position).normalized;
-        dirToPlayer.y = 0;
-        Vector3 teleportPos = playerPos - dirToPlayer * teleportDistance;
-        teleportPos.y = enemy.transform.position.y;
-        enemy.transform.position = teleportPos;
-        enemy.FaceTarget(playerPos);
-        enemy.anim.applyRootMotion = wasRootMotion;
+        float remaining = Mathf.Max(0, totalTime - (Time.time - startTime));
+        if (remaining > 0) yield return new WaitForSeconds(remaining);
 
-        float animStartTime = Time.time;
-        float timeToHit = Mathf.Max(0, hitWindowStart);
-        yield return new WaitForSeconds(timeToHit);
-
-        enemy.currentAttackDamage = damage;
-        enemy.EnableWeaponHitBox(true, false);
-
-        yield return new WaitForSeconds(hitWindowDuration);
-        enemy.EnableWeaponHitBox(false, false);
-
-        float elapsed = Time.time - animStartTime;
-        // 先等到慢放起点
-        float timeToSlowStart = Mathf.Max(0, sheathSlowStartTime - elapsed);
-        if (timeToSlowStart > 0f) yield return new WaitForSeconds(timeToSlowStart);
-
-        // 收刀段：统一正常速度 + 决策
-        float timeToSheath = Mathf.Max(0, sheathTime - sheathSlowStartTime);
-        var phaseMgr = enemy.GetComponent<BossPhaseManager>();
-        bool isBurst = phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst;
-
-        if (isBurst)
-            enemy.nextMoveAfterSheath = FindObjectOfType<BossDecisionEngine>()?.ForceDecide();
-
-        yield return new WaitForSeconds(timeToSheath);
-
-        if (enemy.shouldAbortAttack) yield break;
-
-        float tailTime = (229f / 60f) - sheathTime;
-        if (tailTime > 0) yield return new WaitForSeconds(tailTime);
-
-        enemy.anim.SetBool("isQuick", false);
+        anim.SetBool(animBool, false);
         yield return null;
-        attackFinished = true;
-    }
-
-    public override void Execute()
-    {
-        if (enemy == null) return;
-        enemy.FacePlayer();
-        if (attackFinished) enemy.OnAttackFinished();
-    }
-
-    public override void Exit()
-    {
-        if (routine != null) StopCoroutine(routine);
-        enemy.RegisterAttackRoutine(null);
-        enemy.EnableWeaponHitBox(false, false);
-        enemy.ForceWeaponToSheath();
     }
 }

@@ -1,120 +1,116 @@
 using System.Collections;
 using UnityEngine;
 
-public class ChargeSlashState : State<EnemyController>
+/// <summary>
+/// ChargeSlashState — 蓄力斩（两段蓄力）
+/// </summary>
+public class ChargeSlashState : AttackStateBase
 {
-    private EnemyController enemy;
-    private bool attackFinished = false;
-    private Coroutine routine;
+    [Header("Timing")]
+    public float totalAnimTime = 3.25f;
+    public float chargePauseStart = 0f;
+    public float chargePauseDuration = 0.15f;
+    public float hitWindowStart = 0.15f;
+    public float hitWindowDuration = 0.333f;
+    public float sheathTime = 2.583f;
 
-    [Header("����նʱ���ᣨ195֡��60fps��")]
-    public float sheathTime = 2.583f;            // 收刀时刻：155 / 60
-    public float hitWindowStart = 0f;        // 伤害窗口开始：第10帧
-    public float hitWindowDuration = 0.333f;     // 伤害窗口持续：20帧（10→30）
+    [Header("Damage")]
+    public int damage = 40;
+    public bool isGuardBreak;
 
-    [Header("����ͣ�٣������д��ڿ���ʱͣ�٣�")]
-    public float chargePauseDuration = 0.15f;     // 在第五帧暂停的时间（可在Inspector微调）
+    [Header("Animation")]
+    public string animName = "ChargeSlash";
+    public string animBool = "isChargeSlash";
 
-    [Header("�˺�")]
-    public int damageFirst = 15;                  // ��һ���˺�
-    public int damageSecond = 40;                 // �ڶ����˺��������Ҫ�����ٿ�һ�δ��ڣ�������ֻ��һ�δ����
+    protected override EnemyStates AttackType => EnemyStates.ChargeSlash;
 
-    [Header("��ʽ����")]
-    public bool canBeBlocked = true;
-    public bool isGuardBreak = false;
-    public bool hasSuperArmor = false;
-
-    public override void Enter(EnemyController owner)
+    protected override void SetupAnimation()
     {
-        if (owner == null) return;
-        enemy = owner;
-        attackFinished = false;
-
-        if (enemy.anim == null)
-        {
-            enemy.ChangeState(EnemyStates.Idle);
-            return;
-        }
-
-        if (routine != null) enemy.StopCoroutine(routine);
-        enemy.AttachWeaponToHand();
-        enemy.anim.SetBool("isChargeSlash", true);
-
-        routine = enemy.StartCoroutine(ChargeSlashRoutine());
-        enemy.RegisterAttackRoutine(routine);   // ע�ᵽ������
-
-        // ֹͣ�ƶ����������
-        enemy.FacePlayer();
+        anim.SetLayerWeight(attackLayer, 1f);
+        anim.SetBool(animBool, true);
+        anim.Play(animName, attackLayer, 0f);
     }
 
-    IEnumerator ChargeSlashRoutine()
+    protected override void CleanupAnimation()
     {
-        float animStartTime = Time.time;
+        anim.SetBool(animBool, false);
+    }
 
-        // 1. �ȴ��������д��ڿ���ʱ������5֡��
-        float timeToHit = Mathf.Max(0, hitWindowStart - (Time.time - animStartTime));
-        yield return new WaitForSeconds(timeToHit);
-        float pauseElapsed = 0f;
-        while (pauseElapsed < chargePauseDuration)
+    protected override IEnumerator AttackRoutine => AttackRoutineImpl();
+
+    IEnumerator AttackRoutineImpl()
+    {
+        float startTime = Time.time;
+        yield return StartCoroutine(WaitToPause(startTime));
+        if (combat.shouldAbortAttack) yield break;
+        yield return StartCoroutine(ChargePause());
+        if (combat.shouldAbortAttack) yield break;
+        yield return StartCoroutine(HitWindow());
+        if (combat.shouldAbortAttack) yield break;
+        if (combat.isDerivedMove)
         {
-            float t = pauseElapsed / chargePauseDuration;
-            // ʹ��һ�����ߣ���0���ٽ���Ȼ������
-            float curve = Mathf.Sin(t * Mathf.PI * 0.5f); // ʾ��
-            enemy.anim.speed = Mathf.Lerp(0f, 1f, curve);
-            pauseElapsed += Time.deltaTime;
+            // ★ 要求：攻击动画完整播完 → 马上接下一招（不再 0.2s 快速收刀掐断动画）
+            yield return WaitAttackAnimationEnd();
+            yield break;   // 攻击结束，链队列立即接下一招
+        }
+        yield return StartCoroutine(SheathPhase(startTime));
+        if (combat.shouldAbortAttack) yield break;
+
+        float elapsed = Time.time - startTime;
+        float remaining = Mathf.Max(0, totalAnimTime - elapsed);
+        if (remaining > 0) yield return new WaitForSeconds(remaining);
+        if (combat.shouldAbortAttack) yield break;
+
+        anim.SetBool(animBool, false);
+        yield return null;
+    }
+
+    IEnumerator WaitToPause(float startTime)
+    {
+        float wait = Mathf.Max(0, chargePauseStart - (Time.time - startTime));
+        if (wait > 0) yield return new WaitForSeconds(wait);
+    }
+
+    IEnumerator ChargePause()
+    {
+        float elapsed = 0f;
+        while (elapsed < chargePauseDuration)
+        {
+            if (combat.shouldAbortAttack) yield break;
+            float t = elapsed / chargePauseDuration;
+            anim.speed = Mathf.Lerp(0f, 1f, 1f - (1f - t) * (1f - t));
+            elapsed += Time.deltaTime;
             yield return null;
         }
-        enemy.anim.speed = 1f;
-
-        // 3. ����������ײ�壨��һ���˺���
-        enemy.currentAttackDamage = damageFirst;
-        enemy.EnableWeaponHitBox(true, false);
-
-        // 4. ������ײ�忪�� hitWindowDuration ��
-        yield return new WaitForSeconds(hitWindowDuration);
-
-        // 5. �ر���ײ�壨�����п��ܻ�����ŷ����ڶ����˺�����û�У������Թ���
-        enemy.EnableWeaponHitBox(false, false);
-
-        // 6. �����Ϊ�����˺������������ٴο��������Ӧ����֡��Ŀǰ�Ե���Ϊ����
-
-        // 收刀阶段：统一正常速度 + 决策
-        float timeToSheath = Mathf.Max(0, sheathTime - hitWindowStart - hitWindowDuration);
-        var phaseMgr = enemy.GetComponent<BossPhaseManager>();
-        bool isBurst = phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst;
-
-        if (isBurst)
-            enemy.nextMoveAfterSheath = FindObjectOfType<BossDecisionEngine>()?.ForceDecide();
-
-        yield return new WaitForSeconds(timeToSheath);
-        if (enemy.shouldAbortAttack) yield break;
-
-        // 9. �ȴ�����β����195-155=40֡��0.667�룩
-        float tailTime = (195f / 60f) - sheathTime;
-        if (tailTime > 0) yield return new WaitForSeconds(tailTime);
-        if (enemy.shouldAbortAttack) yield break;
-
-        enemy.anim.SetBool("isChargeSlash", false);
-        yield return null;
-        attackFinished = true;
+        anim.speed = 1f;
     }
 
-    public override void Execute()
+    IEnumerator HitWindow()
     {
-        if (enemy == null) return;
-        enemy.FacePlayer();
-
-        if (attackFinished)
-            enemy.OnAttackFinished();
+        combat.SetAttackDamage(damage);
+        combat.EnableWeaponHitBox(true, false);
+        float elapsed = 0f;
+        while (elapsed < hitWindowDuration)
+        {
+            if (combat.shouldAbortAttack) { combat.EnableWeaponHitBox(false, false); yield break; }
+            // ★ 派生模式：动画到衔接点立即结束判定（先到者，保证连招节奏不被长判定窗口卡住）
+            if (combat.isDerivedMove && AnimAtLinkPoint())
+            {
+                combat.EnableWeaponHitBox(false, false);
+                yield break;
+            }
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+        combat.EnableWeaponHitBox(false, false);
     }
 
-    public override void Exit()
+    IEnumerator SheathPhase(float startTime)
     {
-        if (routine != null) enemy.StopCoroutine(routine);
-        enemy.RegisterAttackRoutine(null);      // ע��
-        // ȷ���뿪ʱ�����ٶȻָ�����
-        if (enemy != null && enemy.anim != null)
-            enemy.anim.speed = 1f;
-        enemy.EnableWeaponHitBox(false, false);
+        float wait = Mathf.Max(0, sheathTime - (Time.time - startTime));
+        if (wait > 0) yield return new WaitForSeconds(wait);
+        var phaseMgr = controller.GetComponent<BossPhaseManager>();
+        if (phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst && decisionEngine != null)
+            controller.nextMoveAfterSheath = decisionEngine.ForceDecide();
     }
 }

@@ -1,127 +1,97 @@
 using System.Collections;
 using UnityEngine;
 
-public class ComboState : State<EnemyController>
+/// <summary>
+/// ComboState — 连斩
+/// </summary>
+public class ComboState : AttackStateBase
 {
-    private EnemyController enemy;
-    private bool attackFinished = false;
-    private Coroutine routine;
+    [Header("Timing")]
+    public float hitWindowDuration = 4.25f;
+    public float sheathTime = 4.25f;
+    public float totalTime = 5.333f;
 
-    [Header("��նʱ���ᣨ60fps����320֡��")]
-    public float animTotalTime = 5.333f;
-    public float hitWindowStart = 0f;              // 第0帧开始
-    public float hitWindowDuration = 4.25f;         // 持续到第255帧
-    public int damage = 30;                         // 单次伤害
+    [Header("Damage")]
+    public int damage = 30;
+    public bool isGuardBreak;
 
-    [Header("ǰ��֡����")]
-    public float freezeDuration = 0.5f;
+    [Header("Animation")]
+    public string animBool = "isCombo";
 
-    [Header("ǰ�ö���")]
-    [SerializeField] private string preAttackAnimName = "ToFight";  // ����ǰ�����������ŵĶ���
+    private Vector3 startPosition;
 
-    // ������ʼ����������ն�ڼ䲻ת��
-    private Vector3 attackDirection;
+    protected override EnemyStates AttackType => EnemyStates.Combo;
 
-    // ========== Ԥ������Ч��� ==========
-    [Header("��Ч (Ԥ��)")]
-    public AudioClip comboStartSound;
-    public AudioClip comboHitSound;
+    protected override void SetupAnimation()
+    {
+        anim.applyRootMotion = true;
+        anim.SetBool(animBool, true);
+    }
 
-    // ========== Ԥ������Ч��� ==========
-    [Header("��Ч (Ԥ��)")]
-    public GameObject comboSlashEffect;
+    protected override void CleanupAnimation()
+    {
+        anim.applyRootMotion = false;
+        anim.SetBool(animBool, false);
+    }
 
     public override void Enter(EnemyController owner)
     {
-        if (owner == null) return;
-        enemy = owner;
-        attackFinished = false;
+        startPosition = owner.transform.position;
+        base.Enter(owner);
+    }
 
-        if (enemy.anim == null)
+    protected override IEnumerator AttackRoutine => AttackRoutineImpl();
+
+    IEnumerator AttackRoutineImpl()
+    {
+        float startTime = Time.time;
+        combat.SetAttackDamage(damage);
+        combat.EnableWeaponHitBox(true, false);
+
+        float hitEnd = startTime + hitWindowDuration;
+        while (Time.time < hitEnd)
         {
-            enemy.ChangeState(EnemyStates.Idle);
-            return;
+            if (combat.shouldAbortAttack) { combat.EnableWeaponHitBox(false, false); yield break; }
+            // ★ 派生模式：动画到衔接点立即结束判定（先到者，保证连招节奏不被长判定窗口卡住）
+            if (combat.isDerivedMove && AnimAtLinkPoint())
+            {
+                combat.EnableWeaponHitBox(false, false);
+                yield break;
+            }
+            yield return null;
         }
+        combat.EnableWeaponHitBox(false, false);
 
-        // ��¼������ʼ����������ң����������ٸ���ת��
-        Vector3 playerPos = enemy.GetPlayerPosition();
-        Vector3 dirToPlayer = (playerPos - enemy.transform.position).normalized;
-        dirToPlayer.y = 0;
-        if (dirToPlayer.magnitude > 0.01f)
-            attackDirection = dirToPlayer;
-        else
-            attackDirection = enemy.transform.forward;
+        float elapsed = Time.time - startTime;
+        if (combat.isDerivedMove)
+        {
+            // ★ 要求：攻击动画完整播完 → 马上接下一招（不再 0.2s 快速收刀掐断动画）
+            yield return WaitAttackAnimationEnd();
+            yield break;   // 攻击结束，链队列立即接下一招
+        }
+        float preSheathWait = Mathf.Max(0, sheathTime - elapsed);
+        if (preSheathWait > 0)
+        {
+            while (preSheathWait > 0 && !combat.shouldAbortAttack) { preSheathWait -= Time.deltaTime; yield return null; }
+        }
+        if (combat.shouldAbortAttack) yield break;
 
-        // ǿ������һ�γ���
-        enemy.transform.rotation = Quaternion.LookRotation(attackDirection);
+        var phaseMgr = controller.GetComponent<BossPhaseManager>();
+        if (phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst && decisionEngine != null)
+            controller.nextMoveAfterSheath = decisionEngine.ForceDecide();
 
-        // ����Э��
-        if (routine != null) enemy.StopCoroutine(routine);
-        routine = enemy.StartCoroutine(ComboRoutine());
-        enemy.RegisterAttackRoutine(routine);
-    }
-
-    IEnumerator ComboRoutine()
-    {
-        // 第0帧：刀挂手上 + 开伤害窗口
-        enemy.AttachWeaponToHand();
-        enemy.anim.applyRootMotion = true;
-        enemy.anim.SetBool("isCombo", true);
-        enemy.currentAttackDamage = damage;
-        enemy.EnableWeaponHitBox(true, false);
-
-        float animStartTime = Time.time;
-
-        // 等待伤害窗口结束（第255帧）
-        yield return new WaitForSeconds(hitWindowDuration);
-        enemy.EnableWeaponHitBox(false, false);
-
-        if (enemy.shouldAbortAttack) yield break;
-
-        // 等待尾段（第255帧到第320帧）
-        float elapsed = Time.time - animStartTime;
-        float remaining = Mathf.Max(0, animTotalTime - elapsed);
-
-        var phaseMgr = enemy.GetComponent<BossPhaseManager>();
-        bool isBurst = phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst;
-        if (isBurst)
-            enemy.nextMoveAfterSheath = FindObjectOfType<BossDecisionEngine>()?.ForceDecide();
-
+        elapsed = Time.time - startTime;
+        float remaining = Mathf.Max(0, totalTime - elapsed);
         if (remaining > 0)
-            yield return new WaitForSeconds(remaining);
+        {
+            while (remaining > 0 && !combat.shouldAbortAttack) { remaining -= Time.deltaTime; yield return null; }
+        }
+        if (combat.shouldAbortAttack) yield break;
 
-        // 收尾
-        Vector3 finalPosition = enemy.transform.position;
-        enemy.anim.SetBool("isCombo", false);
-        enemy.anim.applyRootMotion = false;
-        enemy.transform.position = finalPosition;
-        enemy.anim.Play("Idle", 0, 0f);
-        enemy.AttachWeaponToSheath();
+        anim.SetBool(animBool, false);
+        anim.applyRootMotion = false;
+        controller.transform.position = startPosition;
+        combat.AttachWeaponToSheath();
         yield return null;
-        attackFinished = true;
-    }
-
-    public override void Execute()
-    {
-        if (enemy == null) return;
-        // ��ն�ڼ䲻ת��
-        if (attackFinished) enemy.OnAttackFinished();
-    }
-
-    public override void Exit()
-    {
-        if (routine != null) enemy.StopCoroutine(routine);
-        routine = null;
-        enemy.RegisterAttackRoutine(null);
-        enemy.EnableWeaponHitBox(false, false);
-        enemy.ForceWeaponToSheath();
-        enemy.anim.applyRootMotion = false;
-        enemy.anim.Play("Idle", 0, 0f);
-    }
-
-    private void PlaySound(AudioClip clip)
-    {
-        if (clip != null && enemy != null)
-            AudioSource.PlayClipAtPoint(clip, enemy.transform.position);
     }
 }

@@ -41,11 +41,25 @@ public class BossDecisionEngine : MonoBehaviour
     private BossPhaseManager phaseMgr;
     private float currentReadSuccess;
 
-    // 受击锁：HitReactionRoutine 结束后设置，锁定期间决策引擎不工作
-    private float decisionLockedUntil = 0f;
+    // 受击后延迟出手：允许决策但不立即执行
+    private float attackDelayUntil = 0f;
+    private EnemyStates? delayedMove = null;
+
+    // ★ 最近一次抽奖的候选对（供派生链开链）：A/B = 抽出的两招，Chosen = 实际打出的那招
+    public EnemyStates LastCandidateA { get; private set; }
+    public EnemyStates LastCandidateB { get; private set; }
+    public EnemyStates LastChosenMove { get; private set; }
 
     // 首招保证：第一次决策强制出 ThrustSlash
     private bool firstMoveGuaranteed = true;
+
+    /// <summary>
+    /// 由 OpeningSequence 调用，标记开场 ThrustSlash 已通过动画执行
+    /// </summary>
+    public void DisableFirstMoveGuarantee()
+    {
+        firstMoveGuaranteed = false;
+    }
 
     private void Start()
     {
@@ -66,19 +80,30 @@ public class BossDecisionEngine : MonoBehaviour
         if (enemy.isDodging) return null;
         if (enemy.isParryAnimating) return null;
 
-        // 受击锁：锁定期间不决策
-        if (Time.time < decisionLockedUntil) return null;
+        // 有缓存决策且延迟已到 → 立即出手
+        if (delayedMove != null && Time.time >= attackDelayUntil)
+        {
+            var move = delayedMove.Value;
+            delayedMove = null;
+            attackDelayUntil = 0f;
+            ResetTimer();
+            return move;
+        }
 
         if (phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseFinalFlee) return null;
+
+        // 阶段转场期间暂停决策，防止打断转场动画
+        if (phaseMgr != null && phaseMgr.IsInPhaseTransition) return null;
 
         if (phaseMgr != null && phaseMgr.CurrentPhase == BossPhaseManager.BossPhase.PhaseThreeMaster)
         {
             currentReadSuccess = Mathf.Min(baseReadSuccess, currentReadSuccess + successRecoveryPerSec * deltaTime);
         }
 
-        // 每 1 秒 currentRound++，然后抽奖
+        // ★ 决策间隔随阶段速度倍率加速（phaseTwoDecisionSpeed=1.1 → 更快决策）阶段4接线
+        float speedMult = enemy != null ? Mathf.Max(0.1f, enemy.decisionSpeedMultiplier) : 1f;
         timer += deltaTime;
-        if (timer < tickInterval) return null;
+        if (timer < tickInterval / speedMult) return null;
         timer = 0f;
 
         currentRound++;
@@ -91,15 +116,22 @@ public class BossDecisionEngine : MonoBehaviour
             return EnemyStates.ThrustSlash;
         }
 
-        return PerformLottery();
+        EnemyStates? result = PerformLottery();
+        if (result != null && Time.time < attackDelayUntil)
+        {
+            // 决策已做出，但延迟未到 → 缓存，到期再执行
+            delayedMove = result;
+            return null;
+        }
+        return result;
     }
 
     /// <summary>
-    /// 锁定决策一段时间（受击后调用）
+    /// 受击后延迟出手：照常决策，但 0.5s 后才执行
     /// </summary>
     public void LockDecision(float seconds)
     {
-        decisionLockedUntil = Time.time + seconds;
+        attackDelayUntil = Time.time + seconds;
     }
 
     /// <summary>
@@ -109,7 +141,8 @@ public class BossDecisionEngine : MonoBehaviour
     {
         timer = 0f;
         currentRound = 0;
-        decisionLockedUntil = 0f;  // 解锁
+        attackDelayUntil = 0f;
+        delayedMove = null;
     }
 
     /// <summary>
@@ -119,7 +152,9 @@ public class BossDecisionEngine : MonoBehaviour
 
     private EnemyStates? PerformLottery()
     {
-        float k = GetCurrentK();
+        // ★ 频率倍率：freq 低（三阶段 0.6）→ k 高 → 出招频率低 阶段4接线
+        float freqMult = enemy != null ? Mathf.Max(0.1f, enemy.frequencyMultiplier) : 1f;
+        float k = GetCurrentK() / freqMult;
         k += enemy.currentAggression / enemy.maxAggression * 10f;
 
         BuildAvailableMoves();
@@ -148,11 +183,26 @@ public class BossDecisionEngine : MonoBehaviour
         if (Z < S)
         {
             EnemyStates finalMove = SceneAdaptation(candidates[0], candidates[1]);
+            // ★ 记录候选对（派生链开链：链头 = 未选中的另一个候选）
+            LastCandidateA = candidates[0];
+            LastCandidateB = candidates[1];
+            LastChosenMove = finalMove;
             UpdateHistory(finalMove);
             UpdateCooldowns();
             ResetTimer();
             return finalMove;
         }
+        return null;
+    }
+
+    /// <summary>
+    /// 供 BossComboChain 开链：返回上一次决策"抽2选1"中未选中的另一个候选；
+    /// 若 chosen 不在候选对中（首招保证/调试键等）返回 null → 链走兜底全洗牌。
+    /// </summary>
+    public EnemyStates? GetOtherCandidate(EnemyStates chosen)
+    {
+        if (LastCandidateA == chosen) return LastCandidateB;
+        if (LastCandidateB == chosen) return LastCandidateA;
         return null;
     }
 

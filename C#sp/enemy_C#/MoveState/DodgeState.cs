@@ -5,28 +5,9 @@ public class DodgeState : State<EnemyController>
 {
     private EnemyController enemy;
     private bool finished = false;
-    private Vector3 dashDirection;
-    private float dodgeDistance;
-    private float dodgeDuration;
     private bool previousRootMotion;
     private string dodgeAnimName = "Dodge_B";
-
-    [Header("探索阶段 (退/侧闪)")]
-    public float phaseOneDistance = 4f;
-    public float phaseOneDuration = 0.4f;
-    [Range(0f, 1f)] public float phaseOneSideStepChance = 0.2f;
-
-    [Header("狂暴阶段")]
-    public float phaseTwoDistance = 5f;
-    public float phaseTwoDuration = 0.35f;
-
-    [Header("宗师阶段 (微距)")]
-    public float phaseThreeDistance = 1.5f;
-    public float phaseThreeDuration = 0.2f;
-    public float phaseThreeTriggerDistance = 2.5f;
-
-    [Header("位移曲线")]
-    public AnimationCurve dodgeCurve = AnimationCurve.EaseInOut(0, 0, 1, 1);
+    private const float MAX_DODGE_TIME = 2.5f;   // 兜底：动画异常时防止卡死
 
     [Header("预留特效音效")]
     public GameObject dodgeEffect;
@@ -49,21 +30,13 @@ public class DodgeState : State<EnemyController>
         enemy.EnableWeaponHitBox(false, false);
         enemy.DisableAttackLayer();
 
-        DetermineDodgeParameters();
+        DetermineDodgeAnimation();
 
-        // 保底：如果算出来的位移距离太短，强行走后1米
-        float estimatedDist = dodgeCurve.Evaluate(1f) * dodgeDistance;
-        if (estimatedDist < 0.5f)
-        {
-            dashDirection = -enemy.transform.forward;
-            dodgeDistance = 1f;
-            dodgeDuration = 0.25f;
-        }
-
+        // ★ 播放闪避动画 + 开启根运动：
+        //   Dodge_B / Dodge_B_L / Dodge_B_R 片段自带根运动（RootT/RootQ），位移与转身由动画本身驱动。
+        //   旧实现 applyRootMotion=false + 代码平移 transform = 滑步（动画原地播、身体被代码拖走）。
         enemy.anim.Play(dodgeAnimName, 0, 0f);
-
-        if (dashDirection.magnitude < 0.01f)
-            dashDirection = -enemy.transform.forward;
+        enemy.anim.Update(0f);
 
         if (dodgeSound != null)
             AudioSource.PlayClipAtPoint(dodgeSound, enemy.transform.position);
@@ -72,76 +45,45 @@ public class DodgeState : State<EnemyController>
             Object.Instantiate(dodgeEffect, enemy.transform.position, Quaternion.identity);
 
         previousRootMotion = enemy.anim.applyRootMotion;
-        enemy.anim.applyRootMotion = false;
+        enemy.anim.applyRootMotion = true;
 
-        enemy.StartCoroutine(PerformDodge());
+        enemy.StartCoroutine(WaitDodgeFinish());
     }
 
-    private void DetermineDodgeParameters()
+    /// <summary>
+    /// 随机选闪避动画：直后 / 左后 / 右后（位移方向由动画本身决定）
+    /// </summary>
+    private void DetermineDodgeAnimation()
     {
-        BossPhaseManager phaseMgr = enemy?.GetComponent<BossPhaseManager>();
-
-        float distance, duration;
-        if (phaseMgr == null) { distance = phaseOneDistance; duration = phaseOneDuration; }
-        else
-        {
-            switch (phaseMgr.CurrentPhase)
-            {
-                case BossPhaseManager.BossPhase.PhaseTwoBurst:
-                    distance = phaseTwoDistance; duration = phaseTwoDuration; break;
-                case BossPhaseManager.BossPhase.PhaseThreeMaster:
-                    distance = phaseThreeDistance; duration = phaseThreeDuration; break;
-                default:
-                    distance = phaseOneDistance; duration = phaseOneDuration; break;
-            }
-        }
-
-        // 随机方向：直后 / 左后 / 右后
-        Vector3 toPlayer = (enemy.GetPlayerPosition() - enemy.transform.position).normalized;
-        toPlayer.y = 0;
-        if (toPlayer.magnitude < 0.01f) toPlayer = enemy.transform.forward;
-
         float roll = Random.value;
         if (roll < 0.33f)
-        {
             dodgeAnimName = "Dodge_B";
-            dashDirection = -toPlayer;
-        }
         else if (roll < 0.66f)
-        {
             dodgeAnimName = "Dodge_B_L";
-            Vector3 left = Vector3.Cross(toPlayer, Vector3.up).normalized;
-            dashDirection = (-toPlayer + left * 0.5f).normalized;
-        }
         else
-        {
             dodgeAnimName = "Dodge_B_R";
-            Vector3 right = -Vector3.Cross(toPlayer, Vector3.up).normalized;
-            dashDirection = (-toPlayer + right * 0.5f).normalized;
-        }
-
-        dodgeDistance = distance;
-        dodgeDuration = duration;
     }
 
-    IEnumerator PerformDodge()
+    /// <summary>
+    /// 等闪避动画播完（根运动全程驱动位移），播完回 Idle。
+    /// 时长以动画实际长度为准，避免旧实现 0.4s 硬切把 ~1.3s 的闪避动画掐断成滑步。
+    /// </summary>
+    IEnumerator WaitDodgeFinish()
     {
-        // 关掉 CharacterController，避免它干扰手动位移
+        // 关掉 CharacterController，避免它干扰根运动对 Transform 的直接驱动
         CharacterController cc = enemy.GetComponent<CharacterController>();
         if (cc != null) cc.enabled = false;
 
-        Vector3 startPos = enemy.transform.position;
-        float elapsed = 0f;
+        AnimatorStateInfo st = enemy.anim.GetCurrentAnimatorStateInfo(0);
+        float clipLen = st.IsName(dodgeAnimName) ? st.length : 1.2f;
+        float waitTime = Mathf.Clamp(clipLen, 0.3f, MAX_DODGE_TIME);
 
-        while (elapsed < dodgeDuration)
+        float elapsed = 0f;
+        while (elapsed < waitTime)
         {
             elapsed += Time.deltaTime;
-            float t = elapsed / dodgeDuration;
-            enemy.transform.position = startPos + dashDirection * (dodgeCurve.Evaluate(t) * dodgeDistance);
             yield return null;
         }
-
-        enemy.transform.position = startPos + dashDirection * dodgeDistance;
 
         // 恢复 CharacterController
         if (cc != null) cc.enabled = true;

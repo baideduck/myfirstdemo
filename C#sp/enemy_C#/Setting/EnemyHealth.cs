@@ -28,7 +28,7 @@ public class EnemyHealth : MonoBehaviour
         enemyController = GetComponent<EnemyController>();
     }
 
-    public void TakeDamage(float damage, Vector3 hitPoint, float hitStopDuration)
+    public void TakeDamage(float damage, Vector3 hitPoint, float hitStopDuration, bool isHeavyHit = false)
     {
         if (isDead) return;
 
@@ -95,11 +95,13 @@ public class EnemyHealth : MonoBehaviour
             }
         }
 
-        bool isHeavy = damage >= heavyHitThreshold;
+        // ★ 轻重判定由玩家侧传入（IsCurrentAttackHeavy / 蓄力≥2），不再用伤害阈值——
+        //   蓝斩 1.3x 会把普通攻击 20 推成 26 ≥ 25，导致"轻击也打断"（回合结构失效）
+        bool isHeavy = isHeavyHit;
         if (enemyController != null)
         {
             Vector3 hitDir = (hitPoint - transform.position).normalized;
-            enemyController.PlayHitReaction(hitDir, isHeavy, hitStopDuration);
+            enemyController.combat.PlayHitReaction(hitDir, isHeavy, hitStopDuration);
         }
 
         if (currentHealth <= 0)

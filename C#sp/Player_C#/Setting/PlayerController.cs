@@ -12,11 +12,14 @@ public class PlayerController : MonoBehaviour
     [SerializeField] Vector3 groundCheckOffset;
     [SerializeField] LayerMask groundLayer;
 
+    [Header("Movement Accel")]
+    [SerializeField] float moveAccel = 20f;   // ★ 水平速度平滑加速度：越大越跟手（12≈0.15s、20≈0.08s 达到目标速度）
+
     [Header("Dodge (Monster Hunter Style)")]
     [SerializeField] float dodgeDistance = 5f;
     [SerializeField] float dodgeDuration = 0.5f;
     [SerializeField] float invincibilityDuration = 0.2f;
-    [SerializeField] float dodgeCooldown = 1f;
+    [SerializeField] float dodgeCooldown = 0.45f;   // ★ 1→0.45：翻滚起身后连续闪避诉求不再被静默丢弃（"翻滚后卡"主因）
 
     private float ySpeed;
     private Quaternion targetRotation;
@@ -24,6 +27,7 @@ public class PlayerController : MonoBehaviour
     private int combatLayerIndex;
     private float combatLayerWeight = 0f;
     private float moveLockTimer = 0f;
+    private Vector3 smoothedVelocity = Vector3.zero;   // ★ 水平速度平滑：丝滑起步/刹车 + 翻滚起身无缝衔接
     public float combatLayerSmoothTime = 10f;
 
     private CameraController cameraController;
@@ -69,6 +73,7 @@ public class PlayerController : MonoBehaviour
 
         animator.updateMode = AnimatorUpdateMode.UnscaledTime;
         animator.speed = 1f;
+        animator.applyRootMotion = true;
     }
 
     private void Start()
@@ -122,7 +127,6 @@ public class PlayerController : MonoBehaviour
             if (phaseMgr != null)
             {
                 phaseMgr.TriggerPhaseThree();
-                Debug.Log("[调试] P键触发角力 PhaseThree");
             }
         }
 
@@ -181,6 +185,14 @@ public class PlayerController : MonoBehaviour
             }
             else
             {
+                // ★ 怪猎式：闪避消耗体力（PlayerStamina.TryDodge）；体力不足则本次闪避输入作废
+                PlayerStamina stamina = GetComponent<PlayerStamina>();
+                if (stamina != null && !stamina.TryDodge())
+                {
+                    dodgeLocked = false;
+                    return;
+                }
+
                 bool wasInAction = meleeFighter != null && meleeFighter.InAction;
                 if (meleeFighter != null && meleeFighter.TryInterruptActionOnDodge())
                 {
@@ -237,17 +249,18 @@ public class PlayerController : MonoBehaviour
         animator.SetLayerWeight(combatLayerIndex, combatLayerWeight);
 
         // ========== 移动相关 ==========
-        if (isDodging || (meleeFighter != null && (meleeFighter.IsBlocking || meleeFighter.IsInBlockRecovery)))
+        bool hasBlock = meleeFighter != null && (meleeFighter.IsBlocking || meleeFighter.IsInBlockRecovery);
+        bool hasAction = meleeFighter != null && (meleeFighter.InAction || meleeFighter.IsStaggering);
+
+        if (isDodging || hasBlock)
         {
-            if (animator.applyRootMotion)
-                animator.applyRootMotion = false;   // ← 格挡恢复期间强制关根运动
+            // ★ 不再强制关根运动：闪避/格挡的位移由动画根运动驱动（OnAnimatorMove 经 CharacterController 应用）
             ApplyGravityOnly();
             return;
         }
-        if (meleeFighter != null && (meleeFighter.InAction || meleeFighter.IsStaggering))
+        if (hasAction)
         {
-            if (animator.applyRootMotion)
-                animator.applyRootMotion = false;
+            // ★ 不再强制关根运动：攻击/蓄力释放的位移由动画根运动驱动（OnAnimatorMove 经 CharacterController 应用）
             ApplyGravityOnly();
             return;
         }
@@ -287,7 +300,15 @@ public class PlayerController : MonoBehaviour
 
         Vector3 moveInput = new Vector3(h, 0, v).normalized;
         Vector3 moveDir = cameraController.PlanarRotation * moveInput;
-        Vector3 velocity = moveDir * currentSpeed;
+        Vector3 targetVelocity = moveDir * currentSpeed;
+
+        // ★ 水平速度指数平滑（丝滑起步/刹车）：
+        //   翻滚/攻击/格挡期间 ApplyMovement 暂停 → smoothedVelocity 冻结在暂停前的值；
+        //   恢复移动时从冻结值无缝继续——按住方向键翻滚时，起身瞬间直接以走路速度移动，
+        //   消除"速度 0 → 全速突变"的卡一下；站立起步也从 0 柔和加速（更真实跟手）。
+        float accel = 12f;   // 加速度系数：越大越跟手（≈0.15s 达到目标速度）
+        smoothedVelocity = Vector3.Lerp(smoothedVelocity, targetVelocity, 1f - Mathf.Exp(-accel * Time.deltaTime));
+        Vector3 velocity = smoothedVelocity;
         velocity.y = ySpeed;
 
         bool isGrounded = Physics.CheckSphere(transform.TransformPoint(groundCheckOffset), groundCheckRadius, groundLayer);
@@ -353,7 +374,8 @@ public class PlayerController : MonoBehaviour
     private IEnumerator PerformDodge(Vector3 direction)
     {
         bool originalRootMotion = animator.applyRootMotion;
-        animator.applyRootMotion = false;
+        // ★ 闪避位移改由动画根运动驱动（Dodge_F/B/L/R 已切换为 Root 版片段），不再用代码平移 dodgeDistance
+        animator.applyRootMotion = true;
         ySpeed = -0.5f;
 
         isDodgeInputLocked = true;
@@ -361,62 +383,68 @@ public class PlayerController : MonoBehaviour
         canDodge = false;
 
         animator.ResetTrigger(dodgeTriggerID);
-        animator.SetTrigger(dodgeTriggerID);
+        // ★ 强制播放 Dodge 动画（不依赖 Trigger 过渡）：修复连续闪避时第二次不播动画/直接滑步的问题。
+        //   按 DodgeDirection 选择对应翻滚动画（0前/1后/2右/3左），Play 直接切换 Base Layer 状态，Trigger 被吞也无影响。
+        int dirIdx = animator.GetInteger(dodgeDirectionID);
+        if (dirIdx < 0 || dirIdx > 3) dirIdx = 1;   // 默认后滚
+        string dodgeAnim = dirIdx switch
+        {
+            0 => "Dodge_F",
+            1 => "Dodge_B",
+            2 => "Dodge_R",
+            3 => "Dodge_L",
+            _ => "Dodge_B"
+        };
+        animator.Play(dodgeAnim, 0, 0f);
         isInvincible = true;
 
+        // ★ 等动画真正播完：normalizedTime≥1 判定 + 状态切走兜底。
+        //   注意：Dodge 动画播完会自动经 Exit=1 过渡回 Blend Tree，此时 GetCurrentAnimatorStateInfo 的
+        //   IsName(dodgeAnim) 会变 false——若只判断 IsName&&normalizedTime 会永远不满足 → isDodging 死等 6s 超时
+        //   → 期间走路动画原地踏步、无法移动（恶性 bug）。因此用 dodgeStarted 标记：已开始播 Dodge 后，
+        //   状态一旦切走（回 Blend）立即视为播完退出。
         float elapsed = 0f;
-        Vector3 startPos = transform.position;
-
-        while (elapsed < dodgeDuration)
+        float maxDodgeTime = 6f;   // 超时兜底（Dodge 动画最长约 5.3s @30fps）
+        bool dodgeStarted = false;
+        while (elapsed < maxDodgeTime)
         {
-            Vector3 verticalMove = new Vector3(0, ySpeed, 0) * Time.deltaTime;
-            float t = elapsed / dodgeDuration;
-            t = Mathf.SmoothStep(0f, 1f, t);
-            Vector3 targetPos = startPos + direction * dodgeDistance;
-            Vector3 newPos = Vector3.Lerp(startPos, targetPos, t);
-            Vector3 horizontalMove = newPos - transform.position;
-
-            characterController.Move(horizontalMove + verticalMove);
-
             if (elapsed >= invincibilityDuration)
                 isInvincible = false;
+
+            AnimatorStateInfo st = animator.GetCurrentAnimatorStateInfo(0);
+            if (st.IsName(dodgeAnim))
+            {
+                dodgeStarted = true;
+                if (st.normalizedTime >= 1f)
+                    break;   // 动画播完
+            }
+            else if (dodgeStarted)
+            {
+                break;   // 已播完并切回 Blend Tree（动画播完的另一种信号）
+            }
 
             elapsed += Time.deltaTime;
             yield return null;
         }
 
         isInvincible = false;
-
-        Vector3 finalPos = startPos + direction * dodgeDistance;
-        Vector3 finalDelta = finalPos - transform.position;
-        finalDelta.y = 0;
-        characterController.Move(finalDelta);
-
         ySpeed = 0f;
-        animator.SetInteger(dodgeDirectionID, -1);
 
-        yield return new WaitForSeconds(0.25f);
-
+        // ★ 起身：立即交还移动，无缝衔接。
+        //   关键：不强制 SetFloat(moveAmountID, 0f) 归零——玩家按住方向键翻滚时，翻滚中 Update 早退导致
+        //   moveAmount 保持翻滚前的走路值(如0.5)，起身后直接驱动走路动画立即衔接，位移(CC全速)与动画同步 → 丝滑。
+        //   若归零，走路动画要从 0 平滑爬升(0.2s 阻尼≈0.3s)，而 CC 已全速 → 起步滑步"卡一下"。
+        //   不按方向键时 moveAmount 本来就是 0 → Idle 站立，无残留走路问题（"原地走路"根因是 isDodging 死等，已修复）。
+        //   同样不 CrossFade：Animator 4 方向 Dodge 均已配 Exit=1 自动回 Blend，CrossFade 反而会重启走路动画造成起步卡顿。
         isDodging = false;
         isDodgeInputLocked = false;
-
-        float recoveryTime = 0.15f;
-        float timer = 0f;
-        while (timer < recoveryTime)
-        {
-            timer += Time.deltaTime;
-            animator.SetFloat(moveAmountID, 0f);
-            yield return null;
-        }
-        // 翻滚彻底结束前不解锁移动
-        isDodgeInputLocked = false;
-        moveLockTimer = dodgeCooldown;               // ← 整段dodgeCooldown期间锁住
-        yield return new WaitForSeconds(dodgeCooldown);
-        isDodging = false;                           // ← 挪到cooldown之后才解除
-        canDodge = true;
         dodgeLocked = false;
-        animator.applyRootMotion = originalRootMotion;
         animator.SetInteger(dodgeDirectionID, -1);
+        animator.applyRootMotion = originalRootMotion;
+
+        // 仅保留闪避冷却：dodgeCooldown 内不可再次闪避，但移动不受锁
+        yield return new WaitForSeconds(dodgeCooldown);
+        canDodge = true;
     }
 
     private IEnumerator PerformSprint()
@@ -515,6 +543,18 @@ public class PlayerController : MonoBehaviour
         isDodgeInputLocked = false;
         canDodge = true;
         isDodging = false;
+    }
+
+    /// <summary>
+    /// 根运动应用入口：applyRootMotion=true 时（闪避/攻击/蓄力释放/格挡击退等），
+    /// 把动画 deltaPosition 通过 CharacterController 应用，避免 transform 直接位移与 CC 碰撞体脱节。
+    /// 注：MeeleFighter 原有的 OnAnimatorMove 已移除，统一由这里处理，防止重复应用导致双倍位移。
+    /// </summary>
+    private void OnAnimatorMove()
+    {
+        if (animator == null || characterController == null) return;
+        if (animator.applyRootMotion)
+            characterController.Move(animator.deltaPosition);
     }
 
     private void OnDrawGizmosSelected()

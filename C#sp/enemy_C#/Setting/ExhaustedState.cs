@@ -34,6 +34,9 @@ public class ExhaustedState : State<EnemyController>
     [Header("��架�嵼�µĹ̶�����ʱ�䣩")]
     [SerializeField] private float postureBreakFloorDuration = 4f;
 
+    // 狂暴打断透支惩罚：额外倒地时长（秒）。由 BossComboChain 在触发打断（体力不足 10%）前设置，力竭结束重置
+    public float extraDownTime = 0f;
+
     // 是否由架势清空触发
     private bool isPostureBreak;
 
@@ -118,6 +121,10 @@ public class ExhaustedState : State<EnemyController>
         Vector3 frozenPosition = enemy.transform.position;
         Quaternion frozenRotation = enemy.transform.rotation;
 
+        // ★ 二阶段力竭缩短(阶段4): phaseTwoExhaustShorten(0.7)
+        BossPhaseManager pm = enemy.GetComponent<BossPhaseManager>();
+        float shorten = (pm != null && pm.CurrentPhase == BossPhaseManager.BossPhase.PhaseTwoBurst) ? pm.PhaseTwoExhaustShorten : 1f;
+
         if (isPostureBreak)
         {
             // ===== 架势清空路径：播倒地动画 4 秒 =====
@@ -148,7 +155,7 @@ public class ExhaustedState : State<EnemyController>
             }
 
             // 留 4 秒让 Exhausted_Loop 循环播放
-            float loopTimer = postureBreakFloorDuration;
+            float loopTimer = postureBreakFloorDuration * shorten;
             while (loopTimer > 0f)
             {
                 enemy.transform.position = frozenPosition;
@@ -170,8 +177,8 @@ public class ExhaustedState : State<EnemyController>
         else
         {
             // ===== 体力耗尽路径：播倒地动画 + 等待恢复 =====
-            // 阶段1：倒地动画（固定时长）
-            float freezeTimer = startAnimActualTime + loopDurationX;
+            // 阶段1：倒地动画（固定时长 + 狂暴打断透支延长）
+            float freezeTimer = ((startAnimActualTime + loopDurationX) * shorten) + extraDownTime;
             while (freezeTimer > 0f)
             {
                 enemy.transform.position = frozenPosition;
@@ -231,7 +238,7 @@ public class ExhaustedState : State<EnemyController>
         }
 
         float elapsed = 0f;
-        while (elapsed < recoverMoveDuration)
+        while (elapsed < recoverMoveDuration * shorten)
         {
             elapsed += Time.deltaTime;
             enemy.transform.position = Vector3.Lerp(startPos, targetPos, elapsed / recoverMoveDuration);
@@ -283,10 +290,19 @@ public class ExhaustedState : State<EnemyController>
                 enemy.anim.SetLayerWeight(attackLayerIndex, savedAttackLayerWeight);
 
             enemy.anim.speed = 1f;
+            enemy.anim.SetBool("isExhausted", false);   // ★ 力竭被中途打断（如二阶段转场）时必须清标志，否则 Animator 会被 Common→Exhausted_Start 过渡拉回力竭动画，转场动画无法播放
             enemy.anim.applyRootMotion = true;
 
             CharacterController cc = enemy.GetComponent<CharacterController>();
             if (cc != null) cc.enabled = true;
         }
+
+        // ★ 力竭被中途打断（转场/其他状态切换）时清理残留标记：
+        //   1) isPostureBreakExhaust：否则伤害永久 ×1.5、下次体力力竭被误判为架势路径
+        //   2) BossStamina.isExhausted：否则体力永不消耗（ConsumeStamina 直接 return）
+        //   3) extraDownTime：否则透支延长残留到下次力竭
+        enemy.isPostureBreakExhaust = false;
+        extraDownTime = 0f;
+        enemy.GetComponent<BossStamina>()?.ResetExhaustState();
     }
 }

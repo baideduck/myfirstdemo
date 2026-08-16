@@ -5,7 +5,11 @@ public class PlayerWeaponHitbox : MonoBehaviour
 {
     [HideInInspector] public float damage;
     [HideInInspector] public bool isChargeAttack = false;
-    [SerializeField] private float hitStopDuration = 0.05f;
+
+    // ── 蓄力顿帧分档（照抄MHW大剑手感）──
+    [Header("顿帧分档（秒）")]
+    [SerializeField] private float hitStopLv1 = 0.08f;   // 一蓄
+    [SerializeField] private float hitStopLv2 = 0.15f;   // 二蓄
 
     private GameObject owner;
     private int lastHitFrame = -1;
@@ -42,6 +46,15 @@ public class PlayerWeaponHitbox : MonoBehaviour
     }
 
     public void ResetHitState()
+    {
+        lastHitFrame = -1;
+        lastHitTarget = null;
+    }
+
+    /// <summary>
+    /// 强制清空命中记录（蓄力攻击释放时调用，防止上一帧残留）
+    /// </summary>
+    public void ForceClearHitRecord()
     {
         lastHitFrame = -1;
         lastHitTarget = null;
@@ -120,7 +133,8 @@ public class PlayerWeaponHitbox : MonoBehaviour
         if (!meleeFighter.canDamageThisAttack) return;
 
         EnemyHealth enemyHealth = other.GetComponentInParent<EnemyHealth>();
-        if (enemyHealth == null) return;
+        BotHealth botHealth = other.GetComponentInParent<BotHealth>();
+        if (enemyHealth == null && botHealth == null) return;
 
         PlayerSharpness sharpness = GetComponentInParent<PlayerSharpness>();
         EnemyMeatQuality meat = other.GetComponent<EnemyMeatQuality>();
@@ -168,15 +182,43 @@ public class PlayerWeaponHitbox : MonoBehaviour
         bool isHeavy = meleeFighter != null && meleeFighter.IsCurrentAttackHeavy;
         HitFeedbackManager.Instance?.TriggerHitFeedback(hitPoint, isHeavy, chargeLevel);
 
-        enemyHealth.TakeDamage(finalDamage, hitPoint, hitStopDuration);
-        BossPosture posture = targetRoot.GetComponentInChildren<BossPosture>();
-        if (posture != null) posture.OnPlayerHit();
+        // ── 顿帧分档：蓄力越高卡肉越久，玩家敌人同步冻结（MHW大剑核心手感）──
+        float chargeHitStop = GetChargeHitStopDuration(chargeLevel);
+        meleeFighter?.TriggerPlayerHitStop(chargeHitStop);
+
+        // ★ 轻重判定（回合结构）：重击标志 或 蓄力≥2 → 重击（打断 Boss）；普通轻击不打断。
+        //   不能用伤害数值判定——蓝斩 1.3x 会把普通攻击推过阈值
+        bool heavyHit = meleeFighter != null &&
+                        (meleeFighter.IsCurrentAttackHeavy || meleeFighter.CurrentChargeLevel >= 2);
+
+        if (botHealth != null)
+        {
+            botHealth.TakeDamage(finalDamage, hitPoint, chargeHitStop);
+        }
+        else
+        {
+            enemyHealth.TakeDamage(finalDamage, hitPoint, chargeHitStop, heavyHit);
+
+            BossPosture posture = targetRoot.GetComponentInChildren<BossPosture>();
+            if (posture != null) posture.OnPlayerHit();
+        }
 
         // 本次攻击已造成伤害，锁定不再判定
         if (meleeFighter != null) meleeFighter.canDamageThisAttack = false;
 
         lastHitFrame = Time.frameCount;
         lastHitTarget = targetRoot;
+    }
+
+    // ── 蓄力顿帧分档计算 ──
+    private float GetChargeHitStopDuration(int chargeLevel)
+    {
+        return chargeLevel switch
+        {
+            >= 2 => hitStopLv2,   // 二蓄 = 0.15s
+            >= 1 => hitStopLv1,   // 一蓄 = 0.08s
+            _    => 0.05f         // 普攻 = 0.05s
+        };
     }
 
     // �ӳٲ��ŵ�����Ч��Э��
@@ -196,11 +238,5 @@ public class PlayerWeaponHitbox : MonoBehaviour
 
         // ���Э�����ã�������һ�δ���
         groundSoundCoroutine = null;
-    }
-
-    public void ForceClearHitRecord()
-    {
-        lastHitFrame = -1;
-        lastHitTarget = null;
     }
 }

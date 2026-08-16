@@ -95,6 +95,24 @@ public class BossStamina : MonoBehaviour
     }
 
     /// <summary>
+    /// 按固定数值扣体力（狂暴打断代价专用）。
+    /// 扣空后走标准力竭链路（归零 → OnStaminaEmpty → 力竭）。
+    /// </summary>
+    public void ConsumeStaminaFlat(float amount)
+    {
+        if (isExhausted || amount <= 0f) return;
+
+        currentStamina -= amount;
+        if (currentStamina <= 0f)
+        {
+            // 记录是否透支（负值），然后钳到 0
+            wasNegativeAtExhaust = currentStamina < 0f;
+            currentStamina = 0f;
+            OnStaminaEmpty();
+        }
+    }
+
+    /// <summary>
     /// 开始气绝恢复（由 ExhaustedState 进入时调用）
     /// </summary>
     public void StartRecovery()

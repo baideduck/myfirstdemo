@@ -54,24 +54,34 @@ public class CameraController : MonoBehaviour
     [SerializeField] float lockedCameraSpeed = 5f;
     [SerializeField] Vector2 lockOnOffset = new Vector2(0.5f, 0f);
 
-    // ========== 震动系统 ==========
-    [Header("三级蓄力冲击震动")]
+    // ========== 震动系统（MHW大剑手感） ==========
+    [Header("三级蓄力 / 真蓄力斩震动")]
     [SerializeField]
     private AnimationCurve heavySlashShakeCurve = new AnimationCurve(
-        new Keyframe(0f, 1f, 0f, -3f),
-        new Keyframe(0.08f, 0.4f, -2f, 0f),
-        new Keyframe(0.3f, 0f, 0f, 0f)
+        new Keyframe(0f, 1f, 0f, -5f),      // 瞬间峰值
+        new Keyframe(0.06f, 0.5f, -4f, 0f),
+        new Keyframe(0.15f, 0.15f, -2f, 0f),
+        new Keyframe(0.4f, 0f, 0f, 0f)      // 0.4s 完全衰减
     );
-    [SerializeField] private float heavySlashMagnitude = 0.06f;
+    [SerializeField] private float heavySlashMagnitude = 0.12f;
 
-    [Header("二级蓄力冲击震动")]
+    [Header("二级蓄力震动")]
     [SerializeField]
     private AnimationCurve tier2ChargeShakeCurve = new AnimationCurve(
-        new Keyframe(0f, 1f, 0f, -3f),
-        new Keyframe(0.06f, 0.25f, -2f, 0f),
-        new Keyframe(0.15f, 0f, 0f, 0f)
+        new Keyframe(0f, 1f, 0f, -4f),
+        new Keyframe(0.06f, 0.3f, -3f, 0f),
+        new Keyframe(0.25f, 0f, 0f, 0f)
     );
-    [SerializeField] private float tier2ChargeMagnitude = 0.04f;
+    [SerializeField] private float tier2ChargeMagnitude = 0.07f;
+
+    [Header("一级蓄力 / 普通攻击震动")]
+    [SerializeField]
+    private AnimationCurve tier1ChargeShakeCurve = new AnimationCurve(
+        new Keyframe(0f, 1f, 0f, -5f),
+        new Keyframe(0.06f, 0.2f, -3f, 0f),
+        new Keyframe(0.1f, 0f, 0f, 0f)
+    );
+    [SerializeField] private float tier1ChargeMagnitude = 0.03f;
 
     [Header("敌人居合冲击震动")]
     [SerializeField]
@@ -106,6 +116,11 @@ public class CameraController : MonoBehaviour
     private Transform lockedTarget;
     private bool isLockedOn = false;
 
+    // FOV抖动
+    private Camera cam;
+    private float defaultFOV;
+    private Coroutine fovCoroutine;
+
     // ═══════════════════════════════════════
     //  阻尼平滑用
     // ═══════════════════════════════════════
@@ -117,6 +132,9 @@ public class CameraController : MonoBehaviour
     {
         Cursor.visible = false;
         Cursor.lockState = CursorLockMode.Locked;
+
+        cam = GetComponent<Camera>();
+        defaultFOV = cam != null ? cam.fieldOfView : 60f;
 
         targetDistance = distance;
 
@@ -179,11 +197,11 @@ public class CameraController : MonoBehaviour
         rotationX += Input.GetAxis("Mouse Y") * RotationSpeed * invertYval;
         rotationX = Mathf.Clamp(rotationX, minVerticalAngle, maxVerticalAngle);
 
-        // ── 滚轮调距离（带阻尼） ──
+        // ── 滚轮调距离（直接生效，不通过距离 SmoothDamp）──
         float scroll = Input.GetAxis("Mouse ScrollWheel");
         targetDistance -= scroll * scrollSpeed;
         targetDistance = Mathf.Clamp(targetDistance, minDistance, maxDistance);
-        distance = Mathf.SmoothDamp(distance, targetDistance, ref smoothDistanceVelocity, scrollDampTime, maxDistance);
+        distance = targetDistance;
 
         Quaternion targetRotation = Quaternion.Euler(rotationX, rotationY, 0);
 
@@ -202,18 +220,16 @@ public class CameraController : MonoBehaviour
             desiredPosition = focusPosition - targetRotation * new Vector3(0, 0, distance);
         }
 
-        // ── 碰撞检测：地面/墙壁平滑缩回 ──
+        // ── 碰撞检测：有遮挡时限制距离（不影响用户滚轮设置）──
         Vector3 collisionPos = ApplyCameraCollision(desiredPosition, focusPosition);
         float collisionDist = Vector3.Distance(focusPosition, collisionPos);
 
-        // 如果碰撞把镜头推近了，让 targetDistance 逐步缩小（平滑收拢）
         if (collisionDist < distance - 0.01f)
-        {
-            targetDistance = Mathf.Min(targetDistance, collisionDist);
-        }
-        // 当碰撞解除时，逐渐恢复到用户设定的 targetDistance（但用 distance 平滑过渡）
+            distance = collisionDist;   // 仅当帧限制，不写入 targetDistance
 
-        // ── 阻尼：平滑移动镜头位置 ──
+        // ── 撤销上帧震屏偏移 → 平滑移动 → 重新施加震屏 ──
+        transform.position -= appliedShakeOffset;
+
         transform.position = Vector3.SmoothDamp(transform.position, collisionPos, ref smoothPositionVelocity, positionDampTime);
         transform.rotation = targetRotation;
 
@@ -396,6 +412,42 @@ public class CameraController : MonoBehaviour
                 mat.SetColor("_BaseColor", color);
             }
         }
+    }
+
+    public void TriggerTier1ChargeShake()
+    {
+        currentShakeCurve = tier1ChargeShakeCurve;
+        currentShakeMagnitude = tier1ChargeMagnitude;
+        shakeElapsed = 0f;
+        shakeDuration = tier1ChargeShakeCurve.keys[tier1ChargeShakeCurve.length - 1].time;
+    }
+
+    // ═══════════════════════════════════════
+    //  FOV 冲击抖动（命中瞬间镜头微微收缩）
+    // ═══════════════════════════════════════
+    public void TriggerImpactFOV(float fovShrink, float duration)
+    {
+        if (cam == null) return;
+        if (fovCoroutine != null) StopCoroutine(fovCoroutine);
+        fovCoroutine = StartCoroutine(FOVRoutine(fovShrink, duration));
+    }
+
+    private IEnumerator FOVRoutine(float fovShrink, float duration)
+    {
+        float targetFOV = defaultFOV - fovShrink;
+        cam.fieldOfView = targetFOV;            // 瞬间收缩
+
+        float elapsed = 0f;
+        while (elapsed < duration)
+        {
+            elapsed += Time.unscaledDeltaTime;
+            float t = elapsed / duration;
+            cam.fieldOfView = Mathf.Lerp(targetFOV, defaultFOV, t);
+            yield return null;
+        }
+
+        cam.fieldOfView = defaultFOV;           // 确保恢复
+        fovCoroutine = null;
     }
 
     public void TriggerTier2ChargeShake()
